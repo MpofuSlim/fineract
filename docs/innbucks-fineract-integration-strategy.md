@@ -27,7 +27,9 @@ internet and never authenticates a customer.
   fineract-middleware  -->  existing InnBucks notify / WhatsApp gateway
 ```
 
-Three rules hold the whole design together:
+The app in front is the **customer-facing InnBucks mobile app**.
+
+Four rules hold the whole design together:
 
 1. **Never expose Fineract to the FE or the internet.** Its customer-facing surface no
    longer exists (see §4) and every remaining API is a staff API.
@@ -35,6 +37,10 @@ Three rules hold the whole design together:
    upstream `develop` stays a fast-forward for years.
 3. **Notification delivery stays in InnBucks, not in Fineract.** Fineract emits facts;
    the middleware decides who gets told and how.
+4. **The middleware owns customer isolation.** It holds one broad Fineract service account,
+   and Fineract has no per-customer scoping — so every request must resolve its Fineract
+   client id from the JWT server-side, never from a client-supplied parameter. See §6.1;
+   this is the highest-severity control in the design.
 
 Your instinct — your own middleware, consumed by your FE — is the right one. The single
 refinement: put it **behind the existing `api-gateway`** rather than standing it up as a
@@ -210,9 +216,69 @@ has no config row. `custom/acme/event` is the working template for all four part
 
 ## 6. Integrating the app
 
-The app talks to the middleware. Nothing else changes.
+**Confirmed: the app is the customer-facing InnBucks mobile app.** Nothing in §1–§5 changes.
+The app talks to the middleware through the existing gateway and never learns that Fineract
+exists.
 
-- **Route it through the existing `api-gateway`.** The gateway has no catch-all, so a new
+### 6.1 The one control that matters — do not build an IDOR
+
+The middleware authenticates to Fineract as a **single service account with broad
+permissions**, and Fineract's only data scoping is an office-hierarchy string prefix
+(`SpringSecurityPlatformSecurityContext.validateAccessRights`). There is no per-customer
+row-level security, no `client_credentials` grant, and no on-behalf-of delegation.
+
+**Fineract will therefore not stop customer A from reading customer B's accounts. Every
+authorization decision that isolates one customer from another lives entirely in the
+middleware.**
+
+Resolve the Fineract client id **server-side, from the JWT's `userUuid` claim**, on every
+single request. Never from a path, query or body parameter supplied by the app.
+
+```
+GET /banking/accounts                        # correct — client id derived from the token
+GET /banking/clients/{fineractClientId}/...  # an IDOR exposing every customer's balances
+```
+
+The second shape is the tempting one because it mirrors Fineract's own API. Do not expose
+it. This defect is invisible in manual testing, because the developer's own account always
+returns the right data — so pin it with a test that authenticates as customer A and asserts
+`404`/`403` for customer B's identifiers.
+
+### 6.2 Auth — the app gets nothing new
+
+The mobile app keeps the flow documented in
+`ticketing-system/Payments-Frontend-Integration.md`: `POST /auth/login` with a stable
+per-install `X-Device-Id`, a 15-minute access token, a 7-day refresh token, and an
+interceptor that retries once on any `401`. The middleware **verifies** that JWT and issues
+nothing. One base URL, one token, one refresh flow.
+
+### 6.3 Wire format — do not leak Fineract DTOs
+
+Translate every response into the standard `ApiResult` envelope (`{code, message, data}`).
+Fineract's savings representation is awkward on the wire anyway, and the indirection is what
+lets a cell move between Oradian, Fineract and Veengu without shipping a new app build —
+the same reason `CoreBankingPort` exists. Timestamps follow the fleet rule: UTC with an
+explicit `Z`.
+
+### 6.4 Idempotency
+
+The FE contract already requires `Idempotency-Key` on the money paths, minted **when the
+user taps Send, not when the request starts**. That rule matters more on mobile than
+anywhere else: flaky networks plus a retry interceptor is exactly how double-submits happen.
+Carry the key through to Fineract, mapping it onto `externalId` for client creation —
+confirm Fineract's duplicate-create behaviour in phase 0 before relying on it.
+
+### 6.5 Customer ↔ Fineract client linkage
+
+Mirror `user-service/src/main/resources/db/migration/V10__customer_profile_oradian_linkage.sql`
+exactly: add `fineract_client_id BIGINT` and `fineract_external_id VARCHAR(64)` to
+`customer_profiles`, both nullable, each with a **partial** unique index
+(`WHERE ... IS NOT NULL`) so unonboarded customers coexist while the 1:1 mapping is enforced
+in the database.
+
+### 6.6 Plumbing
+
+- **Route through the existing `api-gateway`.** It has no catch-all, so a new
   `fineract-middleware-route` with `Path=/banking/**` and `uri: lb://fineract-middleware` is
   required or every call 404s. Apply the standard `RequestRateLimiter`, and
   `resilientRedisRateLimiter` on any money-moving path.
@@ -228,6 +294,17 @@ The app talks to the middleware. Nothing else changes.
   live and Veengu planned. A `FineractCoreBankingAdapter` is the natural third peer —
   remember `CoreBankingProviderConfig` has a hardcoded allowlist `Set.of("oradian")` that
   **fails boot** on anything else, so `"fineract"` must be added there.
+
+### 6.7 Push notifications — a real gap, decide early
+
+A customer mobile app usually wants push, and **neither side provides it today**. Fineract's
+GCM/FCM module is effectively dead code (`registrationId` is hard-coded `null`), and the
+InnBucks gateway does SMS, WhatsApp and email but not push.
+
+This does not change the design — once events reach the middleware (§5) the fan-out is
+channel-agnostic, so push is one more client alongside the existing three. But if push is a
+day-one app requirement, budget for an FCM/APNs client plus a device-token table and a
+token-refresh path; it will not fall out of the existing gateway for free.
 
 ---
 
@@ -287,15 +364,18 @@ These are enforced by CI and by CLAUDE.md — a Fineract integration does not ge
 
 ## 10. Open questions
 
-1. **What is "the app"?** A customer-facing mobile app changes nothing above. An
-   internal/agent tool might justify a thinner middleware. A third-party partner app would
-   need its own credential model, which none of the above provides.
-2. **Is Fineract replacing Oradian, or running alongside it?** Replacing it makes
+1. ~~**What is "the app"?**~~ **Answered: the customer-facing InnBucks mobile app.** This
+   confirms the design in §1–§5 unchanged and makes §6.1 (client-id scoping) the highest
+   priority control. Note that a *third-party partner* app would be a different problem —
+   Fineract has no `client_credentials` grant, no inbound API-key auth and no per-partner
+   scoping — so if partner access is ever needed, it needs its own credential model.
+2. **Is push a day-one requirement for the app?** See §6.7. It changes scope, not design.
+3. **Is Fineract replacing Oradian, or running alongside it?** Replacing it makes
    `FineractCoreBankingAdapter` the priority. Alongside means the middleware is a
    standalone product surface and phase 4 may never happen.
-3. **Which Fineract products?** Loans, savings, or both — this determines whether
+4. **Which Fineract products?** Loans, savings, or both — this determines whether
    `CoreBankingPort` needs widening beyond `createCustomer` + `listDeposits`.
-4. **Idempotency on client creation.** Fineract's `externalId` is the usual stable-key
+5. **Idempotency on client creation.** Fineract's `externalId` is the usual stable-key
    workaround, but confirm the duplicate-create behaviour in phase 0 before relying on it.
-5. **Tenancy.** Single tenant (`default`) or one per country cell? This affects the
+6. **Tenancy.** Single tenant (`default`) or one per country cell? This affects the
    service-account model and the `Fineract-Platform-TenantId` handling.
