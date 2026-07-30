@@ -1,0 +1,14 @@
+# Governed CVE waiver list for the InnBucks cell image scan.
+#
+# RULES (a waiver without all three is a review failure):
+#   * every entry carries: the CVE id, an owner, a one-line reason, and a
+#     review-by date — as a comment directly above the id
+#   * prefer fixing/upgrading over waiving; a waiver is a scheduled debt,
+#     not a dismissal
+#   * remove entries at their review date or renew them consciously
+#
+# The Release workflow scans CRITICAL/HIGH with --ignore-unfixed, so only
+# FIXABLE vulnerabilities ever gate the push — a red gate means an upgrade
+# exists and should usually just be taken.
+
+# (no waivers yet)
