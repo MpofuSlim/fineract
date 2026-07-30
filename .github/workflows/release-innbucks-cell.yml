@@ -28,8 +28,9 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/fineract
+# NOTE: no static IMAGE env here — the registry path must be LOWERCASE and
+# github.repository_owner is "MpofuSlim"; docker rejects the mixed-case name.
+# The first job step computes IMAGE with shell lowercasing into GITHUB_ENV.
 
 jobs:
   build-scan-push:
@@ -43,6 +44,9 @@ jobs:
       attestations: write
 
     steps:
+      - name: Compute image name (registry paths must be lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fineract" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -101,6 +105,6 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/fineract
+          subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
