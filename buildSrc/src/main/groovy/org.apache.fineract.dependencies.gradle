@@ -258,6 +258,16 @@ dependencyManagement {
         // code execution) is fixed in 3.3.16. Drop when the BOM catches up.
         dependency 'org.springframework.kafka:spring-kafka:3.3.16'
 
+        // Explicit pins, NOT just the jackson-bom import above: another
+        // imported BOM still manages the family at 2.21.2, and with the
+        // dependency-management plugin an explicit entry is the only pin that
+        // beats every BOM (verified: the image shipped 2.21.2 even with
+        // jackson-bom at 2.21.4). 2.21.4 fixes GHSA-r7wm-3cxj-wff9 and
+        // CVE-2026-54512/-54513 (arbitrary code execution). Drop when the
+        // BOMs catch up.
+        dependency 'com.fasterxml.jackson.core:jackson-core:2.21.4'
+        dependency 'com.fasterxml.jackson.core:jackson-databind:2.21.4'
+
         dependency 'com.mysql:mysql-connector-j:9.7.0'
 
         dependency 'org.assertj:assertj-core:3.27.7'
