@@ -79,23 +79,42 @@ jobs:
       - name: Run unit tests
         # --max-workers=2: parallel module builds under one JVM spike the heap;
         # gradle.properties itself recommends capping workers below CPU count.
+        #
+        # The retry fires ONLY on Maven Central's intermittent 403 throttling
+        # of shared runner IPs (observed killing the build in 19s during
+        # buildSrc resolution, before anything compiled). A real test failure
+        # never matches the signature and never retries — a flaky gate that
+        # re-rolls red results would be worse than no gate.
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon --max-workers=2 test \
-            -x :integration-tests:test \
-            -x :twofactor-tests:test \
-            -x :oauth2-tests:test \
-            -x :fineract-e2e-tests-core:test \
-            -x :fineract-e2e-tests-runner:test \
-            -x :fineract-client:buildJavaSdk \
-            -x :fineract-client-feign:buildJavaSdk \
-            -x :fineract-client:test \
-            -x :fineract-client-feign:test \
-            -x cucumber \
-            -x checkstyleMain -x checkstyleTest -x checkstyleJmh \
-            -x spotbugsMain -x spotbugsTest \
-            -x spotlessCheck -x spotlessApply \
-            -x javadoc -x javadocJar -x modernizer -x rat
+          run_tests() {
+            ./gradlew --no-daemon --max-workers=2 test \
+              -x :integration-tests:test \
+              -x :twofactor-tests:test \
+              -x :oauth2-tests:test \
+              -x :fineract-e2e-tests-core:test \
+              -x :fineract-e2e-tests-runner:test \
+              -x :fineract-client:buildJavaSdk \
+              -x :fineract-client-feign:buildJavaSdk \
+              -x :fineract-client:test \
+              -x :fineract-client-feign:test \
+              -x cucumber \
+              -x checkstyleMain -x checkstyleTest -x checkstyleJmh \
+              -x spotbugsMain -x spotbugsTest \
+              -x spotlessCheck -x spotlessApply \
+              -x javadoc -x javadocJar -x modernizer -x rat \
+              2>&1 | tee gradle-out.log
+            return "${PIPESTATUS[0]}"
+          }
+          if ! run_tests; then
+            if grep -q "status code 403 from server" gradle-out.log; then
+              echo "::warning::Maven Central 403 (transient runner throttling) — retrying once in 60s"
+              sleep 60
+              run_tests
+            else
+              exit 1
+            fi
+          fi
 
       - name: Archive test reports
         if: failure()
