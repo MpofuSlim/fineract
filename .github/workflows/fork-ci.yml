@@ -1,0 +1,107 @@
+# Fork CI: the unit-test gate for MpofuSlim/fineract.
+#
+# Upstream's `Fineract CI` (full-build-ci.yml) fans out to a multi-hour matrix
+# (integration tests on three databases, cucumber, e2e, sonar, ...) — far past
+# what a single-tenant fork can spend per push, so it is disabled in the
+# Actions UI, NOT deleted (re-enable it any time a deep upstream merge needs
+# the full battery). Disabling it silently removed EVERY check from PRs; this
+# workflow restores the part a fork PR actually needs: every DB-free unit test
+# in the build, red or green on the PR.
+#
+# Deliberately excluded (they need a provisioned server/database and belong to
+# the disabled heavy matrix): integration-tests, twofactor-tests, oauth2-tests,
+# both e2e modules, and the cucumber task. Static-analysis tasks are skipped
+# here too — this gate is about behaviour, and minutes are the budget.
+#
+# Also excluded: the OpenAPI client-SDK generators and the two client modules'
+# tests. Generating the client SDKs from Fineract's full spec needs most of a
+# 12g heap (upstream dedicates the build-core job to it) — at anything less it
+# dies with "Java heap space", and at 12g it is what the OOM killer reaps on a
+# 16GB runner. The SDKs are consumer artifacts exercised only by the excluded
+# integration/e2e suites; the avro SDK still builds (server compilation needs
+# it).
+#
+# Also reusable via workflow_call: the InnBucks cell release invokes this as
+# its test gate, so no image is ever scanned/attested from a red commit
+# (same doctrine as the middleware's release.yml).
+#
+# Supply-chain rules (match MpofuSlim/ticketing-system): every third-party
+# action pinned to an immutable commit SHA with a trailing version comment;
+# least-privilege permissions.
+name: Fork CI (unit tests)
+
+on:
+  pull_request:
+  push:
+    branches: [develop]
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # Full clone, tags included: Fineract's Gradle build derives its
+          # version from `git describe` and fails at configure time on a
+          # shallow checkout ("couldn't find matching tag in shallow git
+          # repository").
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Bound the build JVM heap
+        # gradle.properties gives the build JVM -Xmx12g, and on a 16GB runner
+        # the JVM grows into it until the OOM killer ends the build with no
+        # verdict ("Gradle build daemon disappeared unexpectedly"). 6g forces
+        # GC instead, and the forked test-worker JVMs keep their own small
+        # default heap. Runtime-only: the checked-in 12g stays for the release
+        # Jib build and local dev.
+        run: sed -i 's/-Xmx12g/-Xmx6g/' gradle.properties
+
+      - name: Run unit tests
+        # --max-workers=2: parallel module builds under one JVM spike the heap;
+        # gradle.properties itself recommends capping workers below CPU count.
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --max-workers=2 test \
+            -x :integration-tests:test \
+            -x :twofactor-tests:test \
+            -x :oauth2-tests:test \
+            -x :fineract-e2e-tests-core:test \
+            -x :fineract-e2e-tests-runner:test \
+            -x :fineract-client:buildJavaSdk \
+            -x :fineract-client-feign:buildJavaSdk \
+            -x :fineract-client:test \
+            -x :fineract-client-feign:test \
+            -x cucumber \
+            -x checkstyleMain -x checkstyleTest -x checkstyleJmh \
+            -x spotbugsMain -x spotbugsTest \
+            -x spotlessCheck -x spotlessApply \
+            -x javadoc -x javadocJar -x modernizer -x rat
+
+      - name: Archive test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-test-reports
+          path: '**/build/reports/tests/'
+          if-no-files-found: ignore
+          retention-days: 5

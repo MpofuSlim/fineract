@@ -33,8 +33,16 @@ concurrency:
 # The first job step computes IMAGE with shell lowercasing into GITHUB_ENV.
 
 jobs:
+  # The Jib build below runs with -x test, so without this gate a cell tag on
+  # a red commit would publish a fully-attested image that was never tested —
+  # same reasoning as the middleware's release.yml test gate.
+  test:
+    name: Unit tests (gate)
+    uses: ./.github/workflows/fork-ci.yml
+
   build-scan-push:
     name: Build, scan, push, attest
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
