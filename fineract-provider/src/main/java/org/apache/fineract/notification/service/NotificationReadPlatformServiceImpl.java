@@ -113,7 +113,7 @@ public class NotificationReadPlatformServiceImpl implements NotificationReadPlat
                 + " as action, ng.notification_content "
                 + "as content, ng.is_system_generated as isSystemGenerated, nm.created_at as createdAt "
                 + "FROM notification_mapper nm INNER JOIN notification_generator ng ON nm.notification_id = ng.id "
-                + "WHERE nm.user_id = ? AND nm.is_read = false order by nm.created_at desc";
+                + "WHERE nm.user_id = ? AND nm.is_read = false";
 
         return getNotificationDataPage(searchParameters, appUserId, sql);
     }
@@ -126,7 +126,7 @@ public class NotificationReadPlatformServiceImpl implements NotificationReadPlat
                 + " as action, ng.notification_content "
                 + "as content, ng.is_system_generated as isSystemGenerated, nm.created_at as createdAt "
                 + "FROM notification_mapper nm INNER JOIN notification_generator ng ON nm.notification_id = ng.id "
-                + "WHERE nm.user_id = ? order by nm.created_at desc";
+                + "WHERE nm.user_id = ?";
 
         return getNotificationDataPage(searchParameters, appUserId, sql);
     }
@@ -142,6 +142,8 @@ public class NotificationReadPlatformServiceImpl implements NotificationReadPlat
                 sqlBuilder.append(' ').append(searchParameters.getSortOrder());
                 this.columnValidator.validateSqlInjection(sqlBuilder.toString(), searchParameters.getSortOrder());
             }
+        } else {
+            sqlBuilder.append(" order by nm.created_at desc");
         }
 
         if (searchParameters.hasLimit()) {
