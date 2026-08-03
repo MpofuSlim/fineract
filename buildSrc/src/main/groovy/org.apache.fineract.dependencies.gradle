@@ -25,7 +25,7 @@ dependencyManagement {
         mavenBom 'com.squareup.okhttp3:okhttp-bom:4.12.0'
         mavenBom 'org.slf4j:slf4j-bom:2.0.17'
         mavenBom 'io.micrometer:micrometer-bom:1.16.5'
-        mavenBom 'org.springframework.boot:spring-boot-dependencies:3.5.14'
+        mavenBom 'org.springframework.boot:spring-boot-dependencies:3.5.16'
         mavenBom 'io.awspring.cloud:spring-cloud-aws-dependencies:4.0.2'
         mavenBom 'io.opentelemetry:opentelemetry-bom:1.62.0'
         mavenBom 'org.jetbrains.kotlin:kotlin-bom:2.3.21'
@@ -308,7 +308,7 @@ dependencyManagement {
         dependency 'org.yakworks:spring-icu4j:0.5.2'
         dependency 'org.apache.commons:commons-lang3:3.20.0'
         dependency 'com.nimbusds:nimbus-jose-jwt:10.9'
-        dependency 'org.springframework:spring-core:6.2.18'
+        dependency 'org.springframework:spring-core:6.2.19'
         dependency 'org.springframework.security:spring-security-core:6.5.10'
         // Keep Netty on the 4.1 line for MockServer compatibility.
         dependency 'io.netty:netty-buffer:4.1.136.Final'
