@@ -134,8 +134,8 @@ dependencyManagement {
         dependency ('org.apache.httpcomponents:httpclient:4.5.14') {
             exclude 'commons-logging:commons-logging:'
         }
-        dependency 'org.apache.httpcomponents.core5:httpcore5:5.4'
-        dependency 'org.apache.httpcomponents.core5:httpcore5-h2:5.4'
+        dependency 'org.apache.httpcomponents.core5:httpcore5:5.4.3'
+        dependency 'org.apache.httpcomponents.core5:httpcore5-h2:5.4.3'
         dependency 'jakarta.management.j2ee:jakarta.management.j2ee-api:1.1.4'
         dependency 'jakarta.jms:jakarta.jms-api:3.1.0'
         dependency 'jakarta.ws.rs:jakarta.ws.rs-api:3.1.0'
@@ -330,8 +330,8 @@ dependencyManagement {
         dependency 'at.yawk.lz4:lz4-java:1.11.0'
         dependency 'org.thymeleaf:thymeleaf:3.1.5.RELEASE'
         dependency 'org.thymeleaf:thymeleaf-spring6:3.1.5.RELEASE'
-        dependency 'org.apache.tomcat.embed:tomcat-embed-core:10.1.55'
-        dependency 'org.apache.tomcat.embed:tomcat-embed-el:10.1.55'
-        dependency 'org.apache.tomcat.embed:tomcat-embed-websocket:10.1.55'
+        dependency 'org.apache.tomcat.embed:tomcat-embed-core:10.1.59'
+        dependency 'org.apache.tomcat.embed:tomcat-embed-el:10.1.59'
+        dependency 'org.apache.tomcat.embed:tomcat-embed-websocket:10.1.59'
     }
 }
