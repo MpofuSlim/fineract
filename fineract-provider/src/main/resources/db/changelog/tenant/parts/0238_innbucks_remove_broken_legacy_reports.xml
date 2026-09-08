@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Licensed to the Apache Software Foundation (ASF) under one
+    or more contributor license agreements. See the NOTICE file
+    distributed with this work for additional information
+    regarding copyright ownership. The ASF licenses this file
+    to you under the Apache License, Version 2.0 (the
+    "License"); you may not use this file except in compliance
+    with the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing,
+    software distributed under the License is distributed on an
+    "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+    KIND, either express or implied. See the License for the
+    specific language governing permissions and limitations
+    under the License.
+
+-->
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.3.xsd">
+
+    <!-- Removes the seeded reports CONFIRMED broken on PostgreSQL (console
+         report, 2026-09-08): every one fails with BadSqlGrammarException, and
+         most take no parameters at all, so the SQL itself is at fault -
+         MySQL-era queries this deployment never ported. They sat in the
+         console as options that can only error. Deleting beats porting here:
+         the Quipo set describes a field-agent/program structure this
+         deployment does not have, and any genuinely wanted report can be
+         re-added PORTED, on demand (see 0227 for the porting pattern).
+
+         TRIM() is load-bearing: 'ClientSummary ' is seeded with a trailing
+         space in BOTH stretchy_report.report_name and
+         m_permission.entity_name. Order: role grants, permissions, report
+         parameters, then the reports - each references the next. -->
+    <changeSet author="innbucks" id="innbucks-remove-broken-legacy-reports">
+        <sql>
+            DELETE FROM m_role_permission WHERE permission_id IN
+                (SELECT id FROM m_permission WHERE grouping = 'report' AND TRIM(entity_name) IN ('FieldAgentStats','ProgramStats','CoordinatorStats','GroupSummaryCounts','GroupSavingSummary','LoanCyclePerProduct','GroupNamesByStaff','BranchManagerStats','ProgramDetails','ProgramDirectorStats','ChildrenStaffList','FullReportList','ReportCategoryList','ClientSummary','TxnRunningBalances'));
+            DELETE FROM m_permission WHERE grouping = 'report' AND TRIM(entity_name) IN ('FieldAgentStats','ProgramStats','CoordinatorStats','GroupSummaryCounts','GroupSavingSummary','LoanCyclePerProduct','GroupNamesByStaff','BranchManagerStats','ProgramDetails','ProgramDirectorStats','ChildrenStaffList','FullReportList','ReportCategoryList','ClientSummary','TxnRunningBalances');
+            DELETE FROM stretchy_report_parameter WHERE report_id IN
+                (SELECT id FROM stretchy_report WHERE TRIM(report_name) IN ('FieldAgentStats','ProgramStats','CoordinatorStats','GroupSummaryCounts','GroupSavingSummary','LoanCyclePerProduct','GroupNamesByStaff','BranchManagerStats','ProgramDetails','ProgramDirectorStats','ChildrenStaffList','FullReportList','ReportCategoryList','ClientSummary','TxnRunningBalances'));
+            DELETE FROM stretchy_report WHERE TRIM(report_name) IN ('FieldAgentStats','ProgramStats','CoordinatorStats','GroupSummaryCounts','GroupSavingSummary','LoanCyclePerProduct','GroupNamesByStaff','BranchManagerStats','ProgramDetails','ProgramDirectorStats','ChildrenStaffList','FullReportList','ReportCategoryList','ClientSummary','TxnRunningBalances');
+        </sql>
+    </changeSet>
+</databaseChangeLog>

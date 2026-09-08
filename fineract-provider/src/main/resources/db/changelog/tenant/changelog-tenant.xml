@@ -254,4 +254,8 @@
     <include file="parts/0233_backfill_repayment_start_date_type_on_loan.xml" relativeToChangelogFile="true" />
     <include file="parts/0234_add_missing_processing_result_enum_values.xml" relativeToChangelogFile="true" />
     <include file="parts/0235_transaction_summary_reports_buydown_fee_allocation.xml" relativeToChangelogFile="true" />
+    <include file="parts/0236_innbucks_add_zwg_currency.xml" relativeToChangelogFile="true" />
+    <include file="parts/0237_innbucks_calendar_delete_cascade.xml" relativeToChangelogFile="true" />
+    <include file="parts/0238_innbucks_remove_broken_legacy_reports.xml" relativeToChangelogFile="true" />
+    <include file="parts/0239_innbucks_office_transaction_currency_multiplesof.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>
