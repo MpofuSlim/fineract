@@ -272,10 +272,9 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
         sqlValidator.validate(searchParameters.getOrderBy());
         sqlValidator.validate(searchParameters.getSortOrder());
-        final String nextDay = sqlGenerator.incrementDateByOneDay("c.end_date");
 
         final CashierTransactionSummaryMapper ctsm = new CashierTransactionSummaryMapper();
-        final String sql = "SELECT " + ctsm.cashierTxnSummarySchema(nextDay) + " LIMIT 1000";
+        final String sql = "SELECT " + ctsm.cashierTxnSummarySchema() + " LIMIT 1000";
         Collection<CashierTransactionTypeTotalsData> cashierTxnTypeTotals = this.jdbcTemplate.query(sql, ctsm, // NOSONAR
                 new Object[] { cashierId, currencyCode, cashierId, currencyCode, cashierId, currencyCode, cashierId, currencyCode });
 
@@ -317,15 +316,16 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
         sqlValidator.validate(searchParameters.getOrderBy());
         sqlValidator.validate(searchParameters.getSortOrder());
-        final String nextDay = sqlGenerator.incrementDateByOneDay("c.end_date");
 
         final CashierTransactionMapper ctm = new CashierTransactionMapper();
 
-        // The allocation covers start_date..end_date inclusive. created_date is a timestamp, so it needs the half-open
-        // window [start_date, end_date + 1 day) or everything after midnight on the last day drops out; the customer
-        // transaction_date columns are plain dates, so a closed BETWEEN on the same two dates is already exact.
-        String sql = "SELECT * FROM (SELECT " + ctm.cashierTxnSchema() + " WHERE txn.cashier_id = ? AND txn.currency_code = ? "
-                + "AND ((txn.created_date >= c.start_date AND txn.created_date < " + nextDay + ") or txn.txn_type = 101))  cashier_txns "
+        // The cashier's own movements belong to this allocation through cashier_id, so they are not windowed by date: a
+        // settle or cash-out recorded at any time - after midnight on the last day included - must still reduce the till.
+        // (Windowing created_date, a timestamp, by the allocation's DATEs is what used to drop the last day.) Customer
+        // transactions reach a cashier only through the staff member, so those are windowed, by transaction_date - a
+        // plain DATE - on exactly the allocation's dates.
+        String sql = "SELECT * FROM (SELECT " + ctm.cashierTxnSchema() + " WHERE txn.cashier_id = ? AND txn.currency_code = ?)"
+                + " cashier_txns "
                 + " union (select " + ctm.savingsTxnSchema() + " where sav_txn.is_reversed = false and c.id = ? and sav.currency_code = ? "
                 + "and sav_txn.transaction_date between c.start_date and c.end_date "
                 + " and renum.enum_value in ('deposit','withdrawal fee', 'Pay Charge', 'withdrawal', 'Annual Fee', 'Waive Charge', 'Interest Posting', 'Overdraft Interest') "
@@ -561,7 +561,7 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
     private static final class CashierTransactionSummaryMapper implements RowMapper<CashierTransactionTypeTotalsData> {
 
-        public String cashierTxnSummarySchema(String nextDay) {
+        public String cashierTxnSummarySchema() {
 
             final StringBuilder sqlBuilder = new StringBuilder(400);
 
@@ -578,10 +578,9 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
             sqlBuilder.append("    left join m_tellers t on t.id = c.teller_id ");
             sqlBuilder.append("    left join m_office o on o.id = t.office_id ");
             sqlBuilder.append("    left join m_staff s on s.id = c.staff_id ");
+            // Same scoping as retrieveCashierTransactions: the cashier's own rows by cashier_id alone, customer rows by
+            // transaction_date on the allocation's dates.
             sqlBuilder.append("    where txn.cashier_id = ? ");
-            // Same windows as retrieveCashierTransactions: half-open for the created_date timestamp, closed BETWEEN for
-            // the transaction_date dates below.
-            sqlBuilder.append(" AND ((txn.created_date >= c.start_date AND txn.created_date < " + nextDay + ") or txn.txn_type = 101) ");
             sqlBuilder.append(" and   txn.currency_code = ? ");
             sqlBuilder.append(" ) cashier_txns ");
             sqlBuilder.append("    UNION ");

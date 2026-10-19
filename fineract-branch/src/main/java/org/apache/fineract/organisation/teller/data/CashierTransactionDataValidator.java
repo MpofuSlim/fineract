@@ -20,7 +20,8 @@ package org.apache.fineract.organisation.teller.data;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.fineract.infrastructure.core.api.JsonCommand;
@@ -82,30 +83,18 @@ public class CashierTransactionDataValidator {
             throw new CashierDateRangeOutOfTellerDateRangeException();
         }
 
-        // Validate cashier has not been assigned for the same duration
+        // One allocation per staff member per date, whatever its hours. The till summary attributes a customer
+        // transaction to a cashier by staff member and date alone (TellerManagementReadPlatformServiceImpl), so two
+        // allocations for one person on one day - even with hours that do not overlap - would each count the other's
+        // cash, and the settle guard would release cash the till does not hold. Hours are deliberately not compared.
         String sql = "SELECT COUNT(*) FROM m_cashiers c WHERE c.staff_id = :staffId AND "
                 + "((:fromDate BETWEEN c.start_date AND c.end_date OR :endDate BETWEEN c.start_date AND c.end_date) "
                 + "OR (c.start_date BETWEEN :fromDate AND :endDate OR c.end_date BETWEEN :fromDate AND :endDate))";
-
-        if (!cashier.getIsFullDay()) {
-            // A part-day allocation clashes with a full-day one on overlapping dates, and with a part-day one whose
-            // hours overlap its own (including one that contains it). Full-day rows store a single space as their
-            // times, which PostgreSQL refuses to cast to TIME - hence NULLIF(TRIM(...)), and CAST rather than the
-            // MySQL-only TIME() function.
-            sql += " AND (c.full_day = true OR NULLIF(TRIM(c.start_time), '') IS NULL OR NULLIF(TRIM(c.end_time), '') IS NULL"
-                    + " OR (CAST(NULLIF(TRIM(c.start_time), '') AS TIME) <= CAST(:endTime AS TIME)"
-                    + " AND CAST(:startTime AS TIME) <= CAST(NULLIF(TRIM(c.end_time), '') AS TIME)))";
-        }
 
         Map<String, Object> paramMap = new HashMap<>();
         paramMap.put("staffId", staffId);
         paramMap.put("fromDate", fromDate);
         paramMap.put("endDate", endDate);
-
-        if (!cashier.getIsFullDay()) {
-            paramMap.put("startTime", cashier.getStartTime());
-            paramMap.put("endTime", cashier.getEndTime());
-        }
 
         Integer count = jdbcTemplate.queryForObject(sql, paramMap, Integer.class);
         if (count != null && count > 0) {
@@ -114,21 +103,25 @@ public class CashierTransactionDataValidator {
     }
 
     public void validateOnLoanDisbursal(AppUser user, String currencyCode, BigDecimal transactionAmount) {
-        LocalDate tenantDate = DateUtils.getLocalDateOfTenant();
-        // Bound as a TIME, not a timestamp: casting a timestamptz to TIME would apply the database session's time
-        // zone rather than the tenant's.
-        LocalTime tenantTime = DateUtils.getOffsetDateTimeOfTenant().toLocalTime();
+        // One reading, to the whole second: the date and the time must describe the same instant, and the databases
+        // disagree on whether a fractional second is rounded or truncated. The time is bound as a TIME, not a
+        // timestamp, because casting a timestamptz to TIME would apply the database session's zone, not the tenant's.
+        final OffsetDateTime now = DateUtils.getOffsetDateTimeOfTenant(ChronoUnit.SECONDS);
         if (user.getStaff() != null) {
-            String sql = "SELECT c.id FROM m_cashiers c WHERE c.staff_id = :staffId "
-                    + "AND (CASE WHEN c.full_day THEN :tenantDate BETWEEN c.start_date AND c.end_date "
-                    + "ELSE (:tenantDate BETWEEN c.start_date AND c.end_date AND "
-                    + "CAST(:tenantTime AS TIME) BETWEEN CAST(NULLIF(TRIM(c.start_time), '') AS TIME) "
-                    + "AND CAST(NULLIF(TRIM(c.end_time), '') AS TIME)) END)";
+            // Hours are only cast for a row that has them. Full-day rows store " ", which PostgreSQL refuses to cast
+            // to TIME, and CASE is the one construct whose evaluation order PostgreSQL guarantees - an OR does not
+            // keep the cast away from those rows. A row without usable hours counts as covering the whole day, so the
+            // till check still applies to it. CAST(TRIM(..)) rather than CAST(NULLIF(..)): MySQL 8 reads
+            // CAST(NULLIF('8:00', '') AS TIME) as 00:00:08. TIME() itself exists only in MySQL.
+            String sql = "SELECT c.id FROM m_cashiers c WHERE c.staff_id = :staffId AND :tenantDate BETWEEN c.start_date AND c.end_date "
+                    + "AND CASE WHEN c.full_day = true OR COALESCE(TRIM(c.start_time), '') = '' OR COALESCE(TRIM(c.end_time), '') = '' "
+                    + "THEN true "
+                    + "ELSE CAST(:tenantTime AS TIME) BETWEEN CAST(TRIM(c.start_time) AS TIME) AND CAST(TRIM(c.end_time) AS TIME) END";
 
             Map<String, Object> paramMap = new HashMap<>();
             paramMap.put("staffId", user.getStaff().getId());
-            paramMap.put("tenantDate", tenantDate);
-            paramMap.put("tenantTime", tenantTime);
+            paramMap.put("tenantDate", now.toLocalDate());
+            paramMap.put("tenantTime", now.toLocalTime());
 
             try {
                 Long cashierId = jdbcTemplate.queryForObject(sql, paramMap, Long.class);

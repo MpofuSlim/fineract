@@ -29,6 +29,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
@@ -62,19 +63,22 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 /**
- * Runs the teller module's hand-written SQL - the till summary and the cashier-allocation checks - against a real
- * database, once per supported dialect (see the subclasses).
+ * Runs the teller module's hand-written SQL - the till summary and the cashier checks - against a real database, once
+ * per supported dialect (see the subclasses).
  *
- * Both defects this pins were invisible to every other test because nothing executed this SQL: the cashier checks
- * called MySQL's TIME(), a syntax error on PostgreSQL, and the till summary compared a timestamp with the allocation's
- * last DATE, so cash moved on that day dropped out of the till.
+ * The defects this pins were invisible to every other test because nothing executed this SQL: the cashier checks called
+ * MySQL's TIME(), a syntax error on PostgreSQL; the till summary windowed the cashier's own movements by comparing a
+ * timestamp with the allocation's last DATE, so cash moved on that day dropped out of the till; and the first fix's
+ * CAST(NULLIF(..) AS TIME) read "8:00" as 00:00:08 on MySQL, which only a MySQL run could show.
  *
  * The schema is the minimum these queries read, with the column types the Liquibase changelog gives a real tenant
- * (timestamp vs date matters to the window under test, and BIT(1) vs BOOLEAN to the full_day comparisons).
+ * (timestamp vs date matters to the windows, and BIT(1) vs BOOLEAN to the full_day comparisons).
  */
 abstract class TellerCashSqlTestBase {
 
-    private static final String TENANT_ZONE = "Africa/Harare";
+    // Two hours ahead of UTC, the zone the CI JVM and the containers run in - which is what lets
+    // cashLoanDisbursalReadsTheTenantsClockNotUtc tell the two clocks apart.
+    private static final ZoneId TENANT_ZONE = ZoneId.of("Africa/Harare");
     private static final String USD = "USD";
 
     // One-day allocation, the ordinary daily shape: the whole till lives on this date.
@@ -101,6 +105,7 @@ abstract class TellerCashSqlTestBase {
     private TellerManagementReadPlatformServiceImpl readService;
     private CashierTransactionDataValidator validator;
     private Staff staff;
+    private AppUser user;
 
     protected abstract DataSource dataSource();
 
@@ -108,7 +113,7 @@ abstract class TellerCashSqlTestBase {
 
     @BeforeEach
     void setUp() {
-        ThreadLocalContextUtil.setTenant(new FineractPlatformTenant(1L, "default", "Default", TENANT_ZONE, null));
+        ThreadLocalContextUtil.setTenant(new FineractPlatformTenant(1L, "default", "Default", TENANT_ZONE.getId(), null));
 
         DataSource dataSource = dataSource();
         jdbc = new JdbcTemplate(dataSource);
@@ -129,6 +134,8 @@ abstract class TellerCashSqlTestBase {
 
         staff = mock(Staff.class);
         when(staff.getId()).thenReturn(STAFF);
+        user = mock(AppUser.class);
+        when(user.getStaff()).thenReturn(staff);
     }
 
     @AfterEach
@@ -157,6 +164,21 @@ abstract class TellerCashSqlTestBase {
     }
 
     @Test
+    void aSettleRecordedAfterTheAllocationEndedStillReducesTheTill() {
+        fullDayCashier(CASHIER, DAY, DAY);
+        cashierTxn(101, 101, "1000", DAY.atTime(7, 30));
+        cashierTxn(103, 102, "600", DAY.atTime(16, 50));
+        cashierTxn(104, 102, "400", DAY.plusDays(1).atTime(7, 45)); // counted up the next morning
+
+        CashierTransactionsWithSummaryData summary = summary();
+
+        // The cashier's own rows belong to the allocation by cashier_id. Windowing them by date - even correctly, up to
+        // midnight after the last day - left this 400 out, and the empty till read 400, ready to be settled again.
+        assertThat(summary.getSumCashSettlement()).isEqualByComparingTo("1000");
+        assertThat(summary.getNetCash()).isEqualByComparingTo("0");
+    }
+
+    @Test
     void customerCashDatedTheDayAfterTheAllocationIsNotInTheTill() {
         fullDayCashier(CASHIER, DAY, DAY);
         cashierTxn(101, 101, "1000", DAY.atTime(7, 30));
@@ -167,17 +189,19 @@ abstract class TellerCashSqlTestBase {
 
         CashierTransactionsWithSummaryData summary = summary();
 
-        // Before the fix the loan and client windows ran to end_date + 1 on a DATE column, so the next day's cash
-        // (often the same teller's next allocation) was counted here too.
+        // Customer cash reaches a cashier only through the staff member, so it is windowed by its date. The loan and client
+        // windows used to run to end_date + 1 on a DATE column, counting the next day's cash - often the same teller's next
+        // allocation - here as well.
         assertThat(summary.getSumInwardCash()).isEqualByComparingTo("100");
         assertThat(summary.getNetCash()).isEqualByComparingTo("1100");
     }
 
     @Test
-    void transactionListingUsesTheSameWindowAsTheSummary() {
+    void transactionListingShowsWhatTheSummaryCounts() {
         fullDayCashier(CASHIER, DAY, DAY);
         cashierTxn(101, 101, "1000", DAY.atTime(7, 30));
         cashierTxn(103, 102, "300", DAY.atTime(16, 45));
+        cashierTxn(104, 102, "200", DAY.plusDays(1).atTime(7, 45));
         savingsDeposit(201, "100", DAY);
         savingsDeposit(202, "999", DAY.plusDays(1));
         loanRepayment(301, "40", DAY.plusDays(1));
@@ -186,14 +210,13 @@ abstract class TellerCashSqlTestBase {
                 .retrieveCashierTransactions(CASHIER, false, null, null, USD, SearchParameters.builder().build()).getPageItems()
                 .stream().map(CashierTransactionData::getId).sorted().collect(Collectors.toList());
 
-        assertThat(listed).containsExactly(101L, 103L, 201L);
+        assertThat(listed).containsExactly(101L, 103L, 104L, 201L);
     }
 
     // ---- cashier allocation clash check ---------------------------------------------------------------------------
 
     @Test
     void partDayAllocationOverAFullDayOneIsRefused() {
-        // Full-day rows store a single space as their times; casting that to TIME is an error on PostgreSQL.
         fullDayCashier(CASHIER, DAY, DAY.plusDays(30));
 
         assertThatThrownBy(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY, "9:00", "12:00"), teller()))
@@ -204,56 +227,78 @@ abstract class TellerCashSqlTestBase {
     void partDayAllocationInsideALongerShiftIsRefused() {
         partDayCashier(CASHIER, DAY, DAY, "8:00", "17:00");
 
-        // Neither end of the existing 08:00-17:00 shift falls inside 10:00-12:00; the old check only looked for that.
         assertThatThrownBy(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY, "10:00", "12:00"), teller()))
                 .isInstanceOf(CashierAlreadyAllocated.class);
     }
 
     @Test
-    void partDayShiftsWhoseHoursDoNotOverlapAreAllowed() {
+    void aSecondAllocationOnTheSameDateIsRefusedEvenWhenTheHoursDoNotOverlap() {
         partDayCashier(CASHIER, DAY, DAY, "8:00", "11:30");
 
-        // "13:5" is how the allocation write path renders 13:05 (minutes are not zero-padded).
-        assertThatCode(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY, "13:5", "15:00"), teller()))
-                .doesNotThrowAnyException();
+        // The till summary attributes customer cash by staff member and date, so a 13:05-15:00 shift on another till would
+        // count the morning shift's cash, and the morning shift the afternoon's. ("13:5" is how the allocation write
+        // path renders 13:05 - minutes are not zero-padded.)
+        assertThatThrownBy(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY, "13:5", "15:00"), teller()))
+                .isInstanceOf(CashierAlreadyAllocated.class);
     }
 
     @Test
-    void shiftsThatOnlyTouchStillClash() {
-        partDayCashier(CASHIER, DAY, DAY, "8:00", "12:00");
+    void anAllocationOnAnotherDateIsAllowed() {
+        partDayCashier(CASHIER, DAY, DAY, "8:00", "17:00");
 
-        // Carried over from the original BETWEEN check: a shared boundary minute counts as an overlap.
-        assertThatThrownBy(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY, "12:00", "16:00"), teller()))
-                .isInstanceOf(CashierAlreadyAllocated.class);
+        assertThatCode(() -> validator.validateCashierAllowedDateAndTime(partDay(DAY.plusDays(1), "8:00", "17:00"), teller()))
+                .doesNotThrowAnyException();
     }
 
     // ---- cash loan disbursal check ---------------------------------------------------------------------------------
 
     @Test
-    void cashLoanDisbursalChecksThePartDayTillCoveringNow() {
-        LocalDateTime now = LocalDateTime.now(ZoneId.of(TENANT_ZONE));
-        Assumptions.assumeTrue(now.toLocalTime().isBefore(LocalTime.of(23, 59)), "the shift below ends at 23:59");
-        partDayCashier(CASHIER, now.toLocalDate(), now.toLocalDate(), "0:00", "23:59");
-        cashierTxn(101, 101, "100", now.toLocalDate().atStartOfDay());
+    void cashLoanDisbursalChecksAFullDayTill() {
+        // Full-day rows store " " as their times: PostgreSQL must never be asked to cast that to TIME.
+        LocalDate today = LocalDate.now(TENANT_ZONE);
+        fullDayCashier(CASHIER, today.minusDays(1), today.plusDays(1));
+        cashierTxn(101, 101, "100", today.atStartOfDay());
 
-        AppUser user = mock(AppUser.class);
-        when(user.getStaff()).thenReturn(staff);
-
-        // Throwing proves the part-day row matched and its till was read; on PostgreSQL the TIME() query used to fail
-        // first, and every cash disbursal by a staff-linked user with it.
         assertThatThrownBy(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("500")))
                 .isInstanceOf(CashierInsufficientAmountException.class);
         assertThatCode(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("60"))).doesNotThrowAnyException();
     }
 
     @Test
+    void cashLoanDisbursalChecksThePartDayTillCoveringTheTenantsTime() {
+        LocalDateTime now = LocalDateTime.now(TENANT_ZONE);
+        LocalTime start = now.toLocalTime().minusMinutes(30);
+        LocalTime end = now.toLocalTime().plusMinutes(30);
+        Assumptions.assumeTrue(start.isBefore(end), "the one-hour shift must not wrap past midnight");
+        partDayCashier(CASHIER, now.toLocalDate().minusDays(1), now.toLocalDate().plusDays(1), stored(start), stored(end));
+        cashierTxn(101, 101, "100", now.toLocalDate().atStartOfDay());
+
+        // Throwing proves the part-day row matched and its till was read. A one-hour shift, not a whole-day one, so a
+        // till matched by a misread time (MySQL's 00:00:08 for "8:00") or the wrong clock does not pass by accident.
+        assertThatThrownBy(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("500")))
+                .isInstanceOf(CashierInsufficientAmountException.class);
+        assertThatCode(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("60"))).doesNotThrowAnyException();
+    }
+
+    @Test
+    void cashLoanDisbursalReadsTheTenantsClockNotUtc() {
+        LocalDateTime tenantNow = LocalDateTime.now(TENANT_ZONE);
+        LocalTime utcTime = LocalTime.now(ZoneOffset.UTC);
+        LocalTime start = utcTime.minusMinutes(30);
+        LocalTime end = utcTime.plusMinutes(30);
+        Assumptions.assumeTrue(start.isBefore(end), "the one-hour shift must not wrap past midnight");
+        // The tenant's wall clock is two hours ahead of this UTC shift, whatever the JVM's own zone.
+        partDayCashier(CASHIER, tenantNow.toLocalDate().minusDays(1), tenantNow.toLocalDate().plusDays(1), stored(start), stored(end));
+        cashierTxn(101, 101, "100", tenantNow.toLocalDate().atStartOfDay());
+
+        assertThatCode(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("1000000"))).doesNotThrowAnyException();
+    }
+
+    @Test
     void cashLoanDisbursalIgnoresATillThatDoesNotCoverToday() {
-        LocalDate yesterday = LocalDate.now(ZoneId.of(TENANT_ZONE)).minusDays(1);
+        LocalDate yesterday = LocalDate.now(TENANT_ZONE).minusDays(1);
         partDayCashier(CASHIER, yesterday, yesterday, "0:00", "23:59");
         cashierTxn(101, 101, "100", yesterday.atStartOfDay());
-
-        AppUser user = mock(AppUser.class);
-        when(user.getStaff()).thenReturn(staff);
 
         assertThatCode(() -> validator.validateOnLoanDisbursal(user, USD, new BigDecimal("1000000"))).doesNotThrowAnyException();
     }
@@ -271,6 +316,11 @@ abstract class TellerCashSqlTestBase {
 
     private Teller teller() {
         return new Teller().setStartDate(LocalDate.of(2020, 1, 1));
+    }
+
+    private static String stored(LocalTime time) {
+        // How the allocation write path renders a time: the minute is not zero-padded unless it is zero.
+        return time.getHour() + ":" + (time.getMinute() == 0 ? "00" : String.valueOf(time.getMinute()));
     }
 
     private void fullDayCashier(long id, LocalDate from, LocalDate to) {
