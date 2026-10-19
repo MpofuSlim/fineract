@@ -232,4 +232,13 @@ dependencies {
         exclude group: 'org.skyscreamer'
     }
     testImplementation ('org.mockito:mockito-inline')
+    // Runs hand-written SQL against each supported database (organisation/teller/service/TellerCashSql*Test).
+    testImplementation ('org.testcontainers:junit-jupiter',
+            'org.testcontainers:postgresql',
+            'org.testcontainers:mariadb',
+            'org.testcontainers:mysql',
+            'org.postgresql:postgresql',
+            'org.mariadb.jdbc:mariadb-java-client',
+            'com.mysql:mysql-connector-j',
+            )
 }

@@ -20,7 +20,7 @@ package org.apache.fineract.organisation.teller.data;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.OffsetDateTime;
+import java.time.LocalTime;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.fineract.infrastructure.core.api.JsonCommand;
@@ -88,8 +88,13 @@ public class CashierTransactionDataValidator {
                 + "OR (c.start_date BETWEEN :fromDate AND :endDate OR c.end_date BETWEEN :fromDate AND :endDate))";
 
         if (!cashier.getIsFullDay()) {
-            sql += " AND (TIME(c.start_time) BETWEEN TIME(:startTime) AND TIME(:endTime) "
-                    + "OR TIME(c.end_time) BETWEEN TIME(:startTime) AND TIME(:endTime))";
+            // A part-day allocation clashes with a full-day one on overlapping dates, and with a part-day one whose
+            // hours overlap its own (including one that contains it). Full-day rows store a single space as their
+            // times, which PostgreSQL refuses to cast to TIME - hence NULLIF(TRIM(...)), and CAST rather than the
+            // MySQL-only TIME() function.
+            sql += " AND (c.full_day = true OR NULLIF(TRIM(c.start_time), '') IS NULL OR NULLIF(TRIM(c.end_time), '') IS NULL"
+                    + " OR (CAST(NULLIF(TRIM(c.start_time), '') AS TIME) <= CAST(:endTime AS TIME)"
+                    + " AND CAST(:startTime AS TIME) <= CAST(NULLIF(TRIM(c.end_time), '') AS TIME)))";
         }
 
         Map<String, Object> paramMap = new HashMap<>();
@@ -110,17 +115,20 @@ public class CashierTransactionDataValidator {
 
     public void validateOnLoanDisbursal(AppUser user, String currencyCode, BigDecimal transactionAmount) {
         LocalDate tenantDate = DateUtils.getLocalDateOfTenant();
-        OffsetDateTime tenantDateTime = DateUtils.getOffsetDateTimeOfTenant();
+        // Bound as a TIME, not a timestamp: casting a timestamptz to TIME would apply the database session's time
+        // zone rather than the tenant's.
+        LocalTime tenantTime = DateUtils.getOffsetDateTimeOfTenant().toLocalTime();
         if (user.getStaff() != null) {
             String sql = "SELECT c.id FROM m_cashiers c WHERE c.staff_id = :staffId "
                     + "AND (CASE WHEN c.full_day THEN :tenantDate BETWEEN c.start_date AND c.end_date "
                     + "ELSE (:tenantDate BETWEEN c.start_date AND c.end_date AND "
-                    + "TIME(:tenantDateTime) BETWEEN TIME(c.start_time) AND TIME(c.end_time)) END)";
+                    + "CAST(:tenantTime AS TIME) BETWEEN CAST(NULLIF(TRIM(c.start_time), '') AS TIME) "
+                    + "AND CAST(NULLIF(TRIM(c.end_time), '') AS TIME)) END)";
 
             Map<String, Object> paramMap = new HashMap<>();
             paramMap.put("staffId", user.getStaff().getId());
             paramMap.put("tenantDate", tenantDate);
-            paramMap.put("tenantDateTime", tenantDateTime);
+            paramMap.put("tenantTime", tenantTime);
 
             try {
                 Long cashierId = jdbcTemplate.queryForObject(sql, paramMap, Long.class);
