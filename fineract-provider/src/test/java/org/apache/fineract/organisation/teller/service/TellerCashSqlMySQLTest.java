@@ -27,14 +27,17 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 /**
- * The teller SQL on MySQL, the dialect the original TIME() calls were written for - at the version upstream's MySQL
- * build runs (build-mysql.yml). Only a real MySQL shows its CAST(NULLIF(..) AS TIME) misreading "8:00" as 00:00:08.
+ * The teller SQL on MySQL, the dialect the original TIME() calls were written for. Only a real MySQL shows its
+ * CAST(NULLIF(..) AS TIME) misreading "8:00" as 00:00:08.
+ *
+ * Pinned to the 8.4 LTS line. mysql:9.7 - what build-mysql.yml runs, as a plain service container - exits with code 1
+ * when started through this Testcontainers version's MySQLContainer (fork CI run 39239832959), so the suite never ran.
  */
 @Testcontainers(disabledWithoutDocker = true)
 class TellerCashSqlMySQLTest extends TellerCashSqlTestBase {
 
     @Container
-    private static final MySQLContainer<?> DATABASE = new MySQLContainer<>(DockerImageName.parse("mysql:9.7"));
+    private static final MySQLContainer<?> DATABASE = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"));
 
     private static DataSource dataSource;
 
