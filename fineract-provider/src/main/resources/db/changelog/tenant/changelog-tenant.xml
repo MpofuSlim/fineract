@@ -258,4 +258,5 @@
     <include file="parts/0237_innbucks_calendar_delete_cascade.xml" relativeToChangelogFile="true" />
     <include file="parts/0238_innbucks_remove_broken_legacy_reports.xml" relativeToChangelogFile="true" />
     <include file="parts/0239_innbucks_office_transaction_currency_multiplesof.xml" relativeToChangelogFile="true" />
+    <include file="parts/0240_innbucks_read_shareaccount_permission.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>

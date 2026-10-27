@@ -154,6 +154,11 @@ public class SynchronousCommandProcessingService implements CommandProcessingSer
             commandSource.setResultStatusCode(statusCode);
             commandSource.setResult(errorInfo.getMessage());
             if (statusCode != SC_OK) {
+                if (commandSource.isAwaitingApproval()) {
+                    // the approval of a parked command failed: the row leaves the inbox as a failed command, and failed
+                    // rows carry no office (visible to head office only), as before the parked row was stamped with one
+                    commandSource.clearOfficeForAudit();
+                }
                 commandSource.setStatus(ERROR);
             }
             if (!isEnclosingTransaction) { // TODO: temporary solution

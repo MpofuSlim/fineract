@@ -23,6 +23,7 @@ import java.util.Optional;
 import lombok.RequiredArgsConstructor;
 import org.apache.fineract.infrastructure.core.service.PagedRequest;
 import org.apache.fineract.infrastructure.security.service.PlatformSecurityContext;
+import org.apache.fineract.portfolio.client.api.ClientApiConstants;
 import org.apache.fineract.portfolio.client.domain.ClientRepository;
 import org.apache.fineract.portfolio.client.service.search.domain.ClientSearchData;
 import org.apache.fineract.portfolio.client.service.search.domain.ClientTextSearch;
@@ -49,7 +50,8 @@ public class ClientSearchService {
     private void validateTextSearchRequest(PagedRequest<ClientTextSearch> searchRequest) {
         Objects.requireNonNull(searchRequest, "searchRequest must not be null");
 
-        context.isAuthenticated();
+        // returns client names, mobile numbers, account numbers and external ids: READ_CLIENT (or ALL_FUNCTIONS[_READ])
+        context.authenticatedUser().validateHasReadPermission(ClientApiConstants.CLIENT_RESOURCE_NAME);
     }
 
     private Page<ClientSearchData> executeTextSearch(PagedRequest<ClientTextSearch> searchRequest) {

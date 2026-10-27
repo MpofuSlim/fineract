@@ -62,6 +62,7 @@ import org.apache.fineract.infrastructure.documentmanagement.data.DocumentDelete
 import org.apache.fineract.infrastructure.documentmanagement.data.DocumentUpdateRequest;
 import org.apache.fineract.infrastructure.documentmanagement.data.DocumentUpdateResponse;
 import org.apache.fineract.infrastructure.documentmanagement.service.DocumentReadPlatformService;
+import org.apache.fineract.infrastructure.security.service.PlatformSecurityContext;
 import org.apache.fineract.util.StreamResponseUtil;
 import org.glassfish.jersey.media.multipart.FormDataBodyPart;
 import org.glassfish.jersey.media.multipart.FormDataContentDisposition;
@@ -86,6 +87,11 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class DocumentApiResource {
 
+    // READ_DOCUMENT; checked here as well as in SecurityConfig so a request matcher that misses a path (as the
+    // exact-depth ones once did for /{documentId} and /{documentId}/attachment) cannot expose a document.
+    private static final String RESOURCE_NAME_FOR_PERMISSIONS = "DOCUMENT";
+
+    private final PlatformSecurityContext context;
     private final DocumentReadPlatformService documentReadPlatformService;
     private final FileUploadValidator fileUploadValidator;
     private final ContentDetectorManager contentDetectorManager;
@@ -103,6 +109,7 @@ public class DocumentApiResource {
     public List<DocumentData> retrieveAllDocuments(@PathParam(DOCUMENT_API_PARAM_ENTITY_TYPE) final String entityType,
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId) {
 
+        context.authenticatedUser().validateHasReadPermission(RESOURCE_NAME_FOR_PERMISSIONS);
         return documentReadPlatformService.retrieveAllDocuments(entityType, entityId);
     }
 
@@ -120,6 +127,7 @@ public class DocumentApiResource {
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId,
             @PathParam(DOCUMENT_API_PARAM_DOCUMENT_ID) final Long documentId) {
 
+        context.authenticatedUser().validateHasReadPermission(RESOURCE_NAME_FOR_PERMISSIONS);
         return documentReadPlatformService.retrieveDocument(entityType, entityId, documentId);
     }
 
@@ -139,6 +147,7 @@ public class DocumentApiResource {
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId,
             @PathParam(DOCUMENT_API_PARAM_DOCUMENT_ID) final Long documentId) {
 
+        context.authenticatedUser().validateHasReadPermission(RESOURCE_NAME_FOR_PERMISSIONS);
         final var content = documentReadPlatformService.retrieveDocumentContent(entityType, entityId, documentId);
 
         return StreamResponseUtil

@@ -30,13 +30,18 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.UriInfo;
+import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.fineract.commands.data.AuditData;
 import org.apache.fineract.commands.data.AuditSearchData;
 import org.apache.fineract.commands.data.request.AuditRequest;
 import org.apache.fineract.commands.service.AuditReadPlatformService;
 import org.apache.fineract.infrastructure.core.api.ApiRequestParameterHelper;
+import org.apache.fineract.infrastructure.core.data.ApiParameterError;
+import org.apache.fineract.infrastructure.core.data.DataValidatorBuilder;
 import org.apache.fineract.infrastructure.core.data.PaginationParameters;
+import org.apache.fineract.infrastructure.core.exception.PlatformApiDataValidationException;
 import org.apache.fineract.infrastructure.core.serialization.ApiRequestJsonSerializationSettings;
 import org.apache.fineract.infrastructure.core.serialization.ToApiJsonSerializer;
 import org.apache.fineract.infrastructure.security.service.PlatformSecurityContext;
@@ -54,6 +59,9 @@ import org.springframework.stereotype.Component;
 public class AuditsApiResource {
 
     private static final String RESOURCE_NAME_FOR_PERMISSIONS = "AUDIT";
+    private static final String RESOURCE_NAME_FOR_VALIDATION = "audit";
+    private static final String STATUS_PARAM = "status";
+    private static final String PROCESSING_RESULT_PARAM = "processingResult";
 
     private final PlatformSecurityContext context;
     private final AuditReadPlatformService auditReadPlatformService;
@@ -147,7 +155,12 @@ public class AuditsApiResource {
                         SQLBuilder.WhereLogicalOperator.OR);
             });
         }
-        extraCriteria.addNonNullCriteria("aud.status = ", auditRequest.getStatus());
+        // aud.status is a SMALLINT processing result id (CommandProcessingResultType: the processingResults ids of
+        // GET /audits/searchtemplate). Bound as a String, PostgreSQL refuses the comparison; "processingResult" (what
+        // the portal sends) was bound but never applied.
+        extraCriteria.addNonNullCriteria("aud.status = ", toProcessingResultId(STATUS_PARAM, auditRequest.getStatus()));
+        extraCriteria.addNonNullCriteria("aud.status = ",
+                toProcessingResultId(PROCESSING_RESULT_PARAM, auditRequest.getProcessingResult()));
         extraCriteria.addNonNullCriteria("aud.office_id = ", auditRequest.getOfficeId());
         extraCriteria.addNonNullCriteria("aud.group_id = ", auditRequest.getGroupId());
         extraCriteria.addNonNullCriteria("aud.client_id = ", auditRequest.getClientId());
@@ -155,5 +168,18 @@ public class AuditsApiResource {
         extraCriteria.addNonNullCriteria("aud.savings_account_id = ", auditRequest.getSavingsAccountId());
 
         return extraCriteria;
+    }
+
+    private static Integer toProcessingResultId(final String parameterName, final String value) {
+        if (StringUtils.isBlank(value)) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (final NumberFormatException e) {
+            final ApiParameterError error = DataValidatorBuilder.buildValidationParameterApiError(RESOURCE_NAME_FOR_VALIDATION,
+                    parameterName, ".not.a.number", "must be a processing result id (a whole number).", value);
+            throw new PlatformApiDataValidationException(List.of(error), e);
+        }
     }
 }

@@ -18,6 +18,8 @@
  */
 package org.apache.fineract.commands.service;
 
+import static org.apache.fineract.commands.domain.CommandProcessingResultType.AWAITING_APPROVAL;
+import static org.apache.fineract.commands.domain.CommandProcessingResultType.PROCESSED;
 import static org.apache.fineract.commands.domain.CommandProcessingResultType.UNDER_PROCESSING;
 import static org.mockito.ArgumentMatchers.any;
 
@@ -27,9 +29,13 @@ import org.apache.fineract.batch.exception.ErrorInfo;
 import org.apache.fineract.commands.domain.CommandSource;
 import org.apache.fineract.commands.domain.CommandSourceRepository;
 import org.apache.fineract.commands.domain.CommandWrapper;
+import org.apache.fineract.commands.exception.RollbackTransactionNotApprovedException;
+import org.apache.fineract.commands.handler.NewCommandSourceHandler;
 import org.apache.fineract.infrastructure.codes.exception.CodeNotFoundException;
 import org.apache.fineract.infrastructure.configuration.domain.ConfigurationDomainService;
 import org.apache.fineract.infrastructure.core.api.JsonCommand;
+import org.apache.fineract.infrastructure.core.data.CommandProcessingResult;
+import org.apache.fineract.infrastructure.core.data.CommandProcessingResultBuilder;
 import org.apache.fineract.infrastructure.core.domain.FineractPlatformTenant;
 import org.apache.fineract.infrastructure.core.exception.ErrorHandler;
 import org.apache.fineract.infrastructure.core.service.ThreadLocalContextUtil;
@@ -97,6 +103,89 @@ public class CommandSourceServiceTest {
 
         CommandSource actual = underTest.getCommandSource(commandId);
         Assertions.assertEquals(commandMock, actual);
+    }
+
+    @Test
+    public void parkedCommandCarriesTheOfficeItsExecutionWasScopedTo() {
+        CommandSource commandSource = parkableCommandSource();
+        NewCommandSourceHandler handler = Mockito.mock(NewCommandSourceHandler.class);
+        JsonCommand command = JsonCommand.from("{}");
+        // a create: the result names the (rolled back) new client and its office
+        CommandProcessingResult result = new CommandProcessingResultBuilder().withOfficeId(7L).withClientId(99L).withEntityId(99L)
+                .withGroupId(3L).build();
+        Mockito.when(handler.processCommand(command)).thenReturn(result);
+        Mockito.when(configurationDomainService.isMakerCheckerEnabledForTask("CREATE_CLIENT")).thenReturn(true);
+        AppUser maker = Mockito.mock(AppUser.class);
+
+        RollbackTransactionNotApprovedException exception = Assertions.assertThrows(RollbackTransactionNotApprovedException.class,
+                () -> underTest.processCommand(handler, command, commandSource, maker, false));
+
+        Assertions.assertEquals(AWAITING_APPROVAL.getValue(), commandSource.getStatus());
+        // office_id is what the audit / Checker Inbox office scoping joins on
+        Assertions.assertEquals(7L, commandSource.getOfficeId());
+        // every other id is read back by approveEntry as input of the re-executed command: never the rolled back
+        // result's ids
+        Assertions.assertNull(commandSource.getResourceId());
+        Assertions.assertNull(commandSource.getClientId());
+        Assertions.assertNull(commandSource.getGroupId());
+        Assertions.assertEquals(42L, exception.getResult().getCommandId());
+        Assertions.assertNull(exception.getResult().getResourceId());
+    }
+
+    @Test
+    public void parkedCommandKeepsItsTargetIdsAndReportsTheRequestedResource() {
+        CommandSource commandSource = parkableCommandSource();
+        // e.g. a loan transaction adjustment: resource_id is the transaction to adjust, the result names the new one
+        commandSource.setResourceId(12L);
+        commandSource.setLoanId(5L);
+        NewCommandSourceHandler handler = Mockito.mock(NewCommandSourceHandler.class);
+        JsonCommand command = JsonCommand.from("{}");
+        CommandProcessingResult result = new CommandProcessingResultBuilder().withOfficeId(7L).withLoanId(5L).withEntityId(555L).build();
+        Mockito.when(handler.processCommand(command)).thenReturn(result);
+        Mockito.when(configurationDomainService.isMakerCheckerEnabledForTask("CREATE_CLIENT")).thenReturn(true);
+
+        RollbackTransactionNotApprovedException exception = Assertions.assertThrows(RollbackTransactionNotApprovedException.class,
+                () -> underTest.processCommand(handler, command, commandSource, Mockito.mock(AppUser.class), false));
+
+        Assertions.assertEquals(12L, commandSource.getResourceId());
+        Assertions.assertEquals(5L, commandSource.getLoanId());
+        Assertions.assertEquals(7L, commandSource.getOfficeId());
+        Assertions.assertEquals(12L, exception.getResult().getResourceId());
+    }
+
+    @Test
+    public void parkedCommandWithoutAnOfficeInItsResultKeepsTheRequestOffice() {
+        CommandSource commandSource = parkableCommandSource();
+        commandSource.setOfficeId(2L);
+        NewCommandSourceHandler handler = Mockito.mock(NewCommandSourceHandler.class);
+        JsonCommand command = JsonCommand.from("{}");
+        Mockito.when(handler.processCommand(command)).thenReturn(new CommandProcessingResultBuilder().withEntityId(1L).build());
+        Mockito.when(configurationDomainService.isMakerCheckerEnabledForTask("CREATE_CLIENT")).thenReturn(true);
+
+        Assertions.assertThrows(RollbackTransactionNotApprovedException.class,
+                () -> underTest.processCommand(handler, command, commandSource, Mockito.mock(AppUser.class), false));
+
+        Assertions.assertEquals(2L, commandSource.getOfficeId());
+    }
+
+    @Test
+    public void commandApprovedByCheckerIsNotParked() {
+        CommandSource commandSource = parkableCommandSource();
+        NewCommandSourceHandler handler = Mockito.mock(NewCommandSourceHandler.class);
+        JsonCommand command = JsonCommand.from("{}");
+        CommandProcessingResult result = new CommandProcessingResultBuilder().withOfficeId(7L).withEntityId(99L).build();
+        Mockito.when(handler.processCommand(command)).thenReturn(result);
+        Mockito.when(configurationDomainService.isMakerCheckerEnabledForTask("CREATE_CLIENT")).thenReturn(true);
+
+        Assertions.assertSame(result, underTest.processCommand(handler, command, commandSource, Mockito.mock(AppUser.class), true));
+        Assertions.assertEquals(PROCESSED.getValue(), commandSource.getStatus());
+    }
+
+    private static CommandSource parkableCommandSource() {
+        CommandSource commandSource = CommandSource.builder().actionName("CREATE").entityName("CLIENT").commandAsJson("{}")
+                .status(UNDER_PROCESSING.getValue()).sanitized(false).build();
+        commandSource.setId(42L);
+        return commandSource;
     }
 
     @Test
