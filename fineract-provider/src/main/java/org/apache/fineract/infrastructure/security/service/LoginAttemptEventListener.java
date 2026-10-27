@@ -100,14 +100,23 @@ public class LoginAttemptEventListener {
             return;
         }
 
+        // A plain read first, outside any transaction: it locks nothing. Only an account that is counted is then
+        // updated, so a wrong password naming one that is not (an unknown user, retries disabled - the middleware's
+        // service accounts - or already locked) opens no transaction and never queues on that user's row behind its
+        // in-flight transactions (see AppUserRepository.findIdOfUserCountingFailedLogins).
+        final Long userId = appUserRepository.findIdOfUserCountingFailedLogins(username);
+        if (userId == null) {
+            return;
+        }
+
         // An atomic increment, then the lock decision, in one transaction. The increment's row lock is held until
         // commit, so concurrent wrong passwords each count and the lock sees every earlier increment.
         final boolean counted = Boolean.TRUE.equals(transactionTemplate.execute(status -> {
-            if (appUserRepository.incrementFailedLoginAttempts(username) == 0) {
-                // unknown user, login retries disabled for it, or already locked
+            if (appUserRepository.incrementFailedLoginAttempts(userId) == 0) {
+                // its retries were disabled, or it was locked, since the read
                 return false;
             }
-            appUserRepository.lockWhenFailedLoginAttemptsReach(username, maxRetries);
+            appUserRepository.lockWhenFailedLoginAttemptsReach(userId, maxRetries);
             return true;
         }));
         if (counted) {

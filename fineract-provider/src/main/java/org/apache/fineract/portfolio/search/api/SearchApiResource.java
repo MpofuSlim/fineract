@@ -53,12 +53,17 @@ import org.springframework.stereotype.Component;
 @Produces({ MediaType.APPLICATION_JSON })
 public class SearchApiResource {
 
-    // Permission entity names (READ_<name>) of the resource types the search returns, as seeded in m_permission.
+    // Permission entity names (READ_<name>) of the resource types the search returns, as seeded in m_permission, each
+    // the one its own read API checks: the group search also returns centers (CentersApiResource checks READ_CENTER),
+    // and the savings search fixed and recurring deposits (READ_FIXEDDEPOSITACCOUNT, READ_RECURRINGDEPOSITACCOUNT).
     private static final String CLIENT = "CLIENT";
     private static final String CLIENT_IDENTIFIER = "CLIENTIDENTIFIER";
     private static final String GROUP = "GROUP";
+    private static final String CENTER = "CENTER";
     private static final String LOAN = "LOAN";
     private static final String SAVINGS_ACCOUNT = "SAVINGSACCOUNT";
+    private static final String FIXED_DEPOSIT_ACCOUNT = "FIXEDDEPOSITACCOUNT";
+    private static final String RECURRING_DEPOSIT_ACCOUNT = "RECURRINGDEPOSITACCOUNT";
     private static final String SHARE_ACCOUNT = "SHAREACCOUNT";
 
     private final PlatformSecurityContext context;
@@ -124,13 +129,22 @@ public class SearchApiResource {
 
     /**
      * Drops every requested resource type the user cannot read, so the default all-types search keeps working for a
-     * user holding only some READ_ permissions. A search none of whose requested types is readable is refused.
+     * user holding only some READ_ permissions. Within the group and savings searches, each kind of row (center or
+     * group; savings account, fixed or recurring deposit) is returned only to a user who can read it. A search none of
+     * whose requested types is readable is refused.
      */
     private static SearchConditions restrictToReadableResources(final SearchConditions requested, final AppUser user) {
         final boolean clients = isRequested(requested.isClientSearch()) && canRead(user, CLIENT);
-        final boolean groups = isRequested(requested.isGroupSearch()) && canRead(user, GROUP);
+        final boolean groupsRequested = isRequested(requested.isGroupSearch());
+        final boolean centerRows = groupsRequested && canRead(user, CENTER);
+        final boolean groupRows = groupsRequested && canRead(user, GROUP);
+        final boolean groups = centerRows || groupRows;
         final boolean loans = isRequested(requested.isLoanSeach()) && canRead(user, LOAN);
-        final boolean savings = isRequested(requested.isSavingSeach()) && canRead(user, SAVINGS_ACCOUNT);
+        final boolean savingsRequested = isRequested(requested.isSavingSeach());
+        final boolean savingsDepositRows = savingsRequested && canRead(user, SAVINGS_ACCOUNT);
+        final boolean fixedDepositRows = savingsRequested && canRead(user, FIXED_DEPOSIT_ACCOUNT);
+        final boolean recurringDepositRows = savingsRequested && canRead(user, RECURRING_DEPOSIT_ACCOUNT);
+        final boolean savings = savingsDepositRows || fixedDepositRows || recurringDepositRows;
         final boolean shares = isRequested(requested.isShareSeach()) && canRead(user, SHARE_ACCOUNT);
         final boolean clientIdentifiers = isRequested(requested.isClientIdentifierSearch()) && canRead(user, CLIENT_IDENTIFIER);
 
@@ -140,7 +154,8 @@ public class SearchApiResource {
         }
 
         return new SearchConditions(requested.getSearchQuery(), requested.getSearchResource(), clients, groups, loans, savings, shares,
-                clientIdentifiers, requested.getExactMatch(), requested.getHierarchy());
+                clientIdentifiers, requested.getExactMatch(), requested.getHierarchy())
+                .withRowKinds(centerRows, groupRows, savingsDepositRows, fixedDepositRows, recurringDepositRows);
     }
 
     private static boolean isRequested(final Boolean flag) {

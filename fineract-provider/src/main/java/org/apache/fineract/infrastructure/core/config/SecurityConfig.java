@@ -61,6 +61,7 @@ import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.DefaultAuthenticationEventPublisher;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
 import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -93,6 +94,7 @@ public class SecurityConfig {
             .withPathPatternParser(caseInsensitivePathPatternParser());
     private static final String DOCUMENTS_PATH = "/api/*/*/*/documents/**";
     private static final String IMAGES_PATH = "/api/*/*/*/images/**";
+    private static final String TWO_FACTOR_AUTHENTICATED = "TWOFACTOR_AUTHENTICATED";
 
     @Autowired
     private ApplicationContext applicationContext;
@@ -135,6 +137,21 @@ public class SecurityConfig {
         return parser;
     }
 
+    /**
+     * hasAnyAuthority, plus the second factor when two-factor authentication is enabled, as the catch-all "/api/**"
+     * rule requires it. TwoFactorAuthenticationFilter lets a request without a two-factor token through without the
+     * TWOFACTOR_AUTHENTICATED authority and leaves the refusal to the rules, so a plain hasAnyAuthority rule that takes
+     * a path off the catch-all opens it to a password-only session.
+     */
+    private AuthorizationManager<RequestAuthorizationContext> hasAnyAuthorityWithSecondFactor(final String... authorities) {
+        final AuthorizationManager<RequestAuthorizationContext> hasAnyAuthority = AuthorityAuthorizationManager
+                .hasAnyAuthority(authorities);
+        if (!fineractProperties.getSecurity().getTwoFactor().isEnabled()) {
+            return hasAnyAuthority;
+        }
+        return allOf(hasAnyAuthority, hasAuthority(TWO_FACTOR_AUTHENTICATED));
+    }
+
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
 
@@ -144,7 +161,7 @@ public class SecurityConfig {
             authorizationManagers.add(fullyAuthenticated());
 
             if (fineractProperties.getSecurity().getTwoFactor().isEnabled()) {
-                authorizationManagers.add(hasAuthority("TWOFACTOR_AUTHENTICATED"));
+                authorizationManagers.add(hasAuthority(TWO_FACTOR_AUTHENTICATED));
             }
 
             auth.requestMatchers(API_MATCHER.matcher(HttpMethod.OPTIONS, "/api/**")).permitAll()
@@ -220,16 +237,17 @@ public class SecurityConfig {
                     // ANY entityType (there is no whitelist), plus /{documentId} and /{documentId}/attachment below it.
                     // Exact-depth per-entity matchers left those sub-paths (and every unlisted entity type) on the
                     // authenticated-only "/api/**" rule. "/**" also matches the collection path and a trailing slash.
-                    // HEAD runs the GET method (Jersey) and no other rule matches it.
+                    // HEAD runs the GET method (Jersey) and no other rule matches it. These rules and the image rules
+                    // took paths off the "/api/**" rule, so they keep its second factor.
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, DOCUMENTS_PATH),
                             API_MATCHER.matcher(HttpMethod.HEAD, DOCUMENTS_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT"))
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, DOCUMENTS_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT"))
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, DOCUMENTS_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT"))
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, DOCUMENTS_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT"))
                     // image: ImagesApiResource serves /v1/{entityType}/{entityId}/images, and Jersey matches the
                     // {entityType} template - and the image services accept it - in ANY case, so case-sensitive
                     // "/api/*/clients/*/images" rules left "/api/v1/CLIENTS/1/images" on the authenticated-only
@@ -237,22 +255,22 @@ public class SecurityConfig {
                     // rules ignore case, and an image under any other entity type is written by the all-functions
                     // authorities only. "/**" also covers the trailing-slash form; HEAD runs the GET method.
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, IMAGES_PATH), API_MATCHER.matcher(HttpMethod.HEAD, IMAGES_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.POST, "/api/*/clients/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_CLIENTIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_CLIENTIMAGE"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.PUT, "/api/*/clients/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CLIENTIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CLIENTIMAGE"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/clients/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_CLIENTIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_CLIENTIMAGE"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.POST, "/api/*/staff/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_STAFFIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_STAFFIMAGE"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.PUT, "/api/*/staff/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_STAFFIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_STAFFIMAGE"))
                     .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/staff/*/images/**"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_STAFFIMAGE")
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_STAFFIMAGE"))
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, IMAGES_PATH), API_MATCHER.matcher(HttpMethod.PUT, IMAGES_PATH),
                             API_MATCHER.matcher(HttpMethod.DELETE, IMAGES_PATH))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE)
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE))
                     // collateral: clients
                     // NOTE: the "_CLIENT_COLLATERAL_PRODUCT" suffix is the legacy permission naming kept for
                     // backwards compatibility (entity_name = CLIENT_COLLATERAL_PRODUCT in the permission table)

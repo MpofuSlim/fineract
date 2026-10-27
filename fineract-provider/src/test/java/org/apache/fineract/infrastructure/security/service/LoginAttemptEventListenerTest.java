@@ -21,7 +21,7 @@ package org.apache.fineract.infrastructure.security.service;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -99,31 +99,49 @@ class LoginAttemptEventListenerTest {
     }
 
     @Test
-    void badCredentialsCountAndLockInOneTransaction() {
+    void badCredentialsAreReadWithoutALockThenCountedAndLockedInOneTransaction() {
         givenLockoutEnabled(3);
         givenCaches();
-        when(appUserRepository.incrementFailedLoginAttempts("user")).thenReturn(1);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenReturn(1);
 
         listener.onAuthenticationEvent(badCredentials("user"));
 
         InOrder inOrder = inOrder(transactionManager, appUserRepository);
+        inOrder.verify(appUserRepository).findIdOfUserCountingFailedLogins("user");
         inOrder.verify(transactionManager).getTransaction(any());
-        inOrder.verify(appUserRepository).incrementFailedLoginAttempts("user");
-        inOrder.verify(appUserRepository).lockWhenFailedLoginAttemptsReach("user", 3);
+        inOrder.verify(appUserRepository).incrementFailedLoginAttempts(17L);
+        inOrder.verify(appUserRepository).lockWhenFailedLoginAttemptsReach(17L, 3);
         inOrder.verify(transactionManager).commit(any());
         verify(usersCache).clear();
         verify(usersByUsernameCache).clear();
     }
 
     @Test
-    void anAccountThatWasNotCountedIsNotLockedAndTheCachesAreKept() {
-        // unknown user, login retries disabled for it, or already locked: the increment matches no row
+    void anAccountThatIsNotCountedIsNeverUpdatedAndOpensNoTransaction() {
+        // unknown user, login retries disabled for it (the middleware's service accounts), or already locked. On InnoDB
+        // an UPDATE naming it would lock its row and queue behind - and in front of - its in-flight transactions.
         givenLockoutEnabled(3);
-        when(appUserRepository.incrementFailedLoginAttempts("user")).thenReturn(0);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(null);
 
         listener.onAuthenticationEvent(badCredentials("user"));
 
-        verify(appUserRepository, never()).lockWhenFailedLoginAttemptsReach(anyString(), anyInt());
+        verify(appUserRepository, never()).incrementFailedLoginAttempts(anyLong());
+        verify(appUserRepository, never()).lockWhenFailedLoginAttemptsReach(anyLong(), anyInt());
+        verifyNoInteractions(transactionManager, cacheManager);
+    }
+
+    @Test
+    void anAccountWhoseFlagsChangedSinceTheReadIsNotLockedAndTheCachesAreKept() {
+        // its retries were disabled, or it was locked, between the read and the increment: the increment matches no row
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenReturn(0);
+
+        listener.onAuthenticationEvent(badCredentials("user"));
+
+        verify(appUserRepository, never()).lockWhenFailedLoginAttemptsReach(anyLong(), anyInt());
+        verify(transactionManager).commit(any());
         verifyNoInteractions(cacheManager);
     }
 
@@ -212,9 +230,19 @@ class LoginAttemptEventListenerTest {
     }
 
     @Test
+    void aDatabaseFaultWhileReadingTheAccountNeverEscapes() {
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenThrow(new DataAccessResourceFailureException("database down"));
+
+        assertDoesNotThrow(() -> listener.onAuthenticationEvent(badCredentials("user")));
+        verifyNoInteractions(transactionManager);
+    }
+
+    @Test
     void aDatabaseFaultWhileCountingNeverEscapes() {
         givenLockoutEnabled(3);
-        when(appUserRepository.incrementFailedLoginAttempts("user")).thenThrow(new DataAccessResourceFailureException("database down"));
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenThrow(new DataAccessResourceFailureException("database down"));
 
         assertDoesNotThrow(() -> listener.onAuthenticationEvent(badCredentials("user")));
         verify(transactionManager).rollback(any());

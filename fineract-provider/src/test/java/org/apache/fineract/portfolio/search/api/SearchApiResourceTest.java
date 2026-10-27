@@ -123,6 +123,54 @@ class SearchApiResourceTest {
     }
 
     @Test
+    void fullReadPermissionsReturnEveryKindOfGroupAndSavingsRow() {
+        for (String permission : List.of("ALL_FUNCTIONS", "ALL_FUNCTIONS_READ")) {
+            SearchConditions conditions = search(null, permission);
+
+            assertTrue(conditions.isCenterRows(), permission);
+            assertTrue(conditions.isGroupRows(), permission);
+            assertTrue(conditions.isSavingsDepositRows(), permission);
+            assertTrue(conditions.isFixedDepositRows(), permission);
+            assertTrue(conditions.isRecurringDepositRows(), permission);
+        }
+    }
+
+    @Test
+    void centersNeedReadCenterAndGroupsReadGroup() {
+        // the group search returns centers too, and CentersApiResource checks READ_CENTER
+        SearchConditions centersOnly = search(null, "READ_CENTER");
+        assertTrue(centersOnly.isGroupSearch());
+        assertTrue(centersOnly.isCenterRows());
+        assertFalse(centersOnly.isGroupRows());
+
+        SearchConditions groupsOnly = search("groups", "READ_GROUP");
+        assertTrue(groupsOnly.isGroupSearch());
+        assertFalse(groupsOnly.isCenterRows());
+        assertTrue(groupsOnly.isGroupRows());
+    }
+
+    @Test
+    void fixedAndRecurringDepositsNeedTheirOwnReadPermission() {
+        // the savings search returns every m_savings_account row, and the deposit APIs check their own permission
+        SearchConditions fixedOnly = search(null, "READ_FIXEDDEPOSITACCOUNT");
+        assertTrue(fixedOnly.isSavingSeach());
+        assertFalse(fixedOnly.isSavingsDepositRows());
+        assertTrue(fixedOnly.isFixedDepositRows());
+        assertFalse(fixedOnly.isRecurringDepositRows());
+        assertFalse(fixedOnly.isClientSearch());
+
+        SearchConditions savingsOnly = search("savings", "READ_SAVINGSACCOUNT");
+        assertTrue(savingsOnly.isSavingsDepositRows());
+        assertFalse(savingsOnly.isFixedDepositRows());
+        assertFalse(savingsOnly.isRecurringDepositRows());
+
+        SearchConditions recurringOnly = search("savings", "READ_RECURRINGDEPOSITACCOUNT");
+        assertTrue(recurringOnly.isSavingSeach());
+        assertFalse(recurringOnly.isSavingsDepositRows());
+        assertTrue(recurringOnly.isRecurringDepositRows());
+    }
+
+    @Test
     void everyPermissionTheSearchChecksIsSeeded() throws IOException {
         // a permission that is not in m_permission cannot be added to a role, so a type gated on it would be lost to
         // every role short of the all-functions ones. Captures what the search actually checks, then looks for it in
@@ -146,8 +194,9 @@ class SearchApiResourceTest {
 
         resource.searchData("Petra", null, false);
 
-        assertTrue(checked.containsAll(
-                List.of("READ_CLIENT", "READ_CLIENTIDENTIFIER", "READ_GROUP", "READ_LOAN", "READ_SAVINGSACCOUNT", "READ_SHAREACCOUNT")),
+        assertTrue(
+                checked.containsAll(List.of("READ_CLIENT", "READ_CLIENTIDENTIFIER", "READ_GROUP", "READ_CENTER", "READ_LOAN",
+                        "READ_SAVINGSACCOUNT", "READ_FIXEDDEPOSITACCOUNT", "READ_RECURRINGDEPOSITACCOUNT", "READ_SHAREACCOUNT")),
                 checked.toString());
         StringBuilder changelogs = new StringBuilder();
         for (Resource changelog : new PathMatchingResourcePatternResolver().getResources("classpath*:db/changelog/tenant/**/*.xml")) {

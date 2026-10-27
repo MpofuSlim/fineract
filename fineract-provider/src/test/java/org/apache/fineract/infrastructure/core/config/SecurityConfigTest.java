@@ -228,6 +228,44 @@ class SecurityConfigTest {
     }
 
     @Test
+    void withTwoFactorEnabledTheDocumentAndImageRulesKeepTheSecondFactor() throws Exception {
+        // These paths used to fall to the catch-all "/api/**" rule, the one that requires the second factor. A session
+        // without a two-factor token never gets TWOFACTOR_AUTHENTICATED (TwoFactorAuthenticationFilter lets it through
+        // and leaves the refusal to the rules), so it must not reach them either.
+        FineractProperties properties = mock(FineractProperties.class, RETURNS_DEEP_STUBS);
+        when(properties.getSecurity().getTwoFactor().isEnabled()).thenReturn(true);
+        ReflectionTestUtils.setField(securityConfig, "fineractProperties", properties);
+        authorizationManager = buildAuthorizationManager();
+
+        String[][] requests = { { "GET", "/api/v1/clients/1/documents/5/attachment", "READ_DOCUMENT" },
+                { "HEAD", "/api/v1/clients/1/documents/5", "READ_DOCUMENT" }, { "GET", "/api/v1/centers/9/documents", "ALL_FUNCTIONS" },
+                { "POST", "/api/v1/clients/1/documents", "CREATE_DOCUMENT" }, { "PUT", "/api/v1/clients/1/documents/5", "UPDATE_DOCUMENT" },
+                { "DELETE", "/api/v1/loans/1/documents/5", "DELETE_DOCUMENT" }, { "GET", "/api/v1/CLIENTS/1/images", "READ_DOCUMENT" },
+                { "HEAD", "/api/v1/staff/1/images/", "READ_DOCUMENT" }, { "POST", "/api/v1/clients/1/images", "CREATE_CLIENTIMAGE" },
+                { "PUT", "/api/v1/Staff/1/images", "UPDATE_STAFFIMAGE" }, { "DELETE", "/api/v1/CLIENTS/1/images", "DELETE_CLIENTIMAGE" },
+                { "DELETE", "/api/v1/loans/1/images", "ALL_FUNCTIONS_WRITE" } };
+        for (String[] request : requests) {
+            HttpMethod method = HttpMethod.valueOf(request[0]);
+            String description = request[0] + " " + request[1];
+            assertFalse(granted(method, request[1], request[2]), description);
+            assertTrue(granted(method, request[1], request[2], "TWOFACTOR_AUTHENTICATED"), description);
+            // the second factor is required in addition to the permission, never instead of it
+            assertFalse(granted(method, request[1], "TWOFACTOR_AUTHENTICATED"), description);
+        }
+
+        // control: the catch-all rule they came from
+        assertFalse(granted(HttpMethod.GET, "/api/v1/offices", "READ_CLIENT"));
+        assertTrue(granted(HttpMethod.GET, "/api/v1/offices", "READ_CLIENT", "TWOFACTOR_AUTHENTICATED"));
+    }
+
+    @Test
+    void withTwoFactorDisabledTheDocumentAndImageRulesNeedOnlyThePermission() {
+        // the default (FINERACT_SECURITY_2FA_ENABLED=false): no TWOFACTOR_AUTHENTICATED authority is ever granted
+        assertTrue(granted(HttpMethod.GET, "/api/v1/clients/1/documents/5/attachment", "READ_DOCUMENT"));
+        assertTrue(granted(HttpMethod.DELETE, "/api/v1/CLIENTS/1/images", "DELETE_CLIENTIMAGE"));
+    }
+
+    @Test
     void authenticationManagerPublishesFailureEvents() throws Exception {
         when(userDetailsService.loadUserByUsername("mifos"))
                 .thenReturn(User.withUsername("mifos").password("{noop}password").authorities("ALL_FUNCTIONS").build());
@@ -264,7 +302,8 @@ class SecurityConfigTest {
                 .setTenant(FineractPlatformTenant.builder().id(1L).tenantIdentifier("default").name("default").timezoneId("UTC").build());
         when(lockoutConfiguration.isMaxLoginRetriesEnabled()).thenReturn(true);
         when(lockoutConfiguration.retrieveMaxLoginRetries()).thenReturn(3);
-        when(appUserRepository.incrementFailedLoginAttempts("mifos")).thenReturn(1);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("mifos")).thenReturn(1L);
+        when(appUserRepository.incrementFailedLoginAttempts(1L)).thenReturn(1);
         when(userDetailsService.loadUserByUsername("mifos"))
                 .thenReturn(User.withUsername("mifos").password("{noop}password").authorities("ALL_FUNCTIONS").build());
         @SuppressWarnings("unchecked")
@@ -274,8 +313,8 @@ class SecurityConfigTest {
 
         assertThrows(BadCredentialsException.class, () -> resource.authenticate("{\"username\":\"mifos\",\"password\":\"wrong\"}"));
 
-        verify(appUserRepository).incrementFailedLoginAttempts("mifos");
-        verify(appUserRepository).lockWhenFailedLoginAttemptsReach("mifos", 3);
+        verify(appUserRepository).incrementFailedLoginAttempts(1L);
+        verify(appUserRepository).lockWhenFailedLoginAttemptsReach(1L, 3);
     }
 
     private void verifyNothingPublishedThroughTheApplicationContext() {

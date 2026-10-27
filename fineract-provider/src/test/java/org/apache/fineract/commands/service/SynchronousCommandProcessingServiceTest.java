@@ -21,6 +21,7 @@ package org.apache.fineract.commands.service;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -77,6 +78,7 @@ import org.mockito.MockitoAnnotations;
 import org.mockito.Spy;
 import org.springframework.context.ApplicationContext;
 import org.springframework.lang.NonNull;
+import org.springframework.transaction.TransactionSystemException;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -795,6 +797,63 @@ public class SynchronousCommandProcessingServiceTest {
 
         assertThrows(IllegalStateException.class, () -> service.executeCommand(wrapper, command, true));
 
+        assertEquals(1, saves.size());
+        assertEquals(CommandProcessingResultType.ERROR.getValue(), saves.get(0)[0]);
+        assertNull(saves.get(0)[1]);
+    }
+
+    /**
+     * Whether a failure ends an approval is decided before processing, not from the status at the failure:
+     * processCommand marks the approved command PROCESSED before its transaction commits, so a failure at commit
+     * reaches the catch block no longer awaiting approval, and must not leave the parked office on the ERROR row
+     * either.
+     */
+    @Test
+    public void approvalOfAParkedCommandFailingAtCommitIsSavedAsErrorWithoutTheParkedOffice() {
+        CommandSourceRepository commandSourceRepository = mock(CommandSourceRepository.class);
+        ErrorHandler errorHandler = mock(ErrorHandler.class);
+        CommandSourceService failingAtCommit = new CommandSourceService(configurationDomainService, commandSourceRepository, errorHandler,
+                null) {
+
+            @Override
+            public CommandProcessingResult processCommand(NewCommandSourceHandler handler, JsonCommand command, CommandSource commandSource,
+                    AppUser user, boolean isApprovedByChecker) {
+                super.processCommand(handler, command, commandSource, user, isApprovedByChecker);
+                // what the transactional proxy throws when the commit fails after the method body returned
+                throw new TransactionSystemException("commit failed");
+            }
+        };
+        SynchronousCommandProcessingService service = new SynchronousCommandProcessingService(context, applicationContext,
+                toApiJsonSerializer, toApiResultJsonSerializer, configurationDomainService, commandHandlerProvider, idempotencyKeyResolver,
+                failingAtCommit, retryConfigurationAssembler, fineractRequestContextHolder);
+
+        CommandSource parked = CommandSource.builder().actionName("CREATE").entityName("CLIENT").idempotencyKey("idk").officeId(7L)
+                .status(CommandProcessingResultType.AWAITING_APPROVAL.getValue()).build();
+        parked.setId(42L);
+        when(commandSourceRepository.findById(42L)).thenReturn(Optional.of(parked));
+
+        CommandWrapper wrapper = CommandWrapper.fromExistingCommand(42L, "CREATE", "CLIENT", null, null, "/clients", null);
+        JsonCommand command = mock(JsonCommand.class);
+        when(command.commandId()).thenReturn(42L);
+        when(context.authenticatedUser(any(CommandWrapper.class))).thenReturn(mock(AppUser.class));
+
+        NewCommandSourceHandler handler = mock(NewCommandSourceHandler.class);
+        when(commandHandlerProvider.getHandler("CLIENT", "CREATE")).thenReturn(handler);
+        when(handler.processCommand(command)).thenReturn(new CommandProcessingResultBuilder().withOfficeId(7L).withClientId(99L).build());
+        when(configurationDomainService.isMakerCheckerEnabledForTask("CREATE_CLIENT")).thenReturn(true);
+        when(errorHandler.handle(any())).thenReturn(new ErrorInfo(500, 5000, "{}", null));
+
+        List<Object[]> saves = new ArrayList<>();
+        when(commandSourceRepository.saveAndFlush(any(CommandSource.class))).thenAnswer(invocation -> {
+            CommandSource saved = invocation.getArgument(0);
+            saves.add(new Object[] { saved.getStatus(), saved.getOfficeId() });
+            return saved;
+        });
+
+        assertThrows(TransactionSystemException.class, () -> service.executeCommand(wrapper, command, true));
+
+        // the failure struck after the approval marked the command checked: the case the in-memory status cannot tell
+        assertNotNull(parked.getChecker());
         assertEquals(1, saves.size());
         assertEquals(CommandProcessingResultType.ERROR.getValue(), saves.get(0)[0]);
         assertNull(saves.get(0)[1]);
