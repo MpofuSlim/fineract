@@ -272,10 +272,9 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
         sqlValidator.validate(searchParameters.getOrderBy());
         sqlValidator.validate(searchParameters.getSortOrder());
-        final String nextDay = sqlGenerator.incrementDateByOneDay("c.end_date");
 
         final CashierTransactionSummaryMapper ctsm = new CashierTransactionSummaryMapper();
-        final String sql = "SELECT " + ctsm.cashierTxnSummarySchema(nextDay) + " LIMIT 1000";
+        final String sql = "SELECT " + ctsm.cashierTxnSummarySchema() + " LIMIT 1000";
         Collection<CashierTransactionTypeTotalsData> cashierTxnTypeTotals = this.jdbcTemplate.query(sql, ctsm, // NOSONAR
                 new Object[] { cashierId, currencyCode, cashierId, currencyCode, cashierId, currencyCode, cashierId, currencyCode });
 
@@ -317,23 +316,27 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
         sqlValidator.validate(searchParameters.getOrderBy());
         sqlValidator.validate(searchParameters.getSortOrder());
-        final String nextDay = sqlGenerator.incrementDateByOneDay("c.end_date");
 
         final CashierTransactionMapper ctm = new CashierTransactionMapper();
 
-        String sql = "SELECT * FROM (SELECT " + ctm.cashierTxnSchema() + " WHERE txn.cashier_id = ? AND txn.currency_code = ? "
-                + "AND ((txn.created_date between c.start_date AND c.end_date  ) or txn.txn_type = 101))  cashier_txns " + " union (select "
-                + ctm.savingsTxnSchema() + " where sav_txn.is_reversed = false and c.id = ? and sav.currency_code = ? "
-                + "and sav_txn.transaction_date between c.start_date and " + nextDay
+        // The cashier's own movements belong to this allocation through cashier_id, so they are not windowed by date: a
+        // settle or cash-out recorded at any time - after midnight on the last day included - must still reduce the till.
+        // (Windowing created_date, a timestamp, by the allocation's DATEs is what used to drop the last day.) Customer
+        // transactions reach a cashier only through the staff member, so those are windowed, by transaction_date - a
+        // plain DATE - on exactly the allocation's dates.
+        String sql = "SELECT * FROM (SELECT " + ctm.cashierTxnSchema() + " WHERE txn.cashier_id = ? AND txn.currency_code = ?)"
+                + " cashier_txns "
+                + " union (select " + ctm.savingsTxnSchema() + " where sav_txn.is_reversed = false and c.id = ? and sav.currency_code = ? "
+                + "and sav_txn.transaction_date between c.start_date and c.end_date "
                 + " and renum.enum_value in ('deposit','withdrawal fee', 'Pay Charge', 'withdrawal', 'Annual Fee', 'Waive Charge', 'Interest Posting', 'Overdraft Interest') "
                 + " and (sav_txn.payment_detail_id IS NULL OR payType.is_cash_payment = true) AND acnttrans.id IS NULL ) "
                 + " union (select " + ctm.loansTxnSchema() + " where loan_txn.is_reversed = false and c.id = ? and loan.currency_code = ? "
-                + "and loan_txn.transaction_date between c.start_date and " + nextDay
+                + "and loan_txn.transaction_date between c.start_date and c.end_date "
                 + " and renum.enum_value IN ('REPAYMENT_AT_DISBURSEMENT','REPAYMENT', 'RECOVERY_REPAYMENT','DISBURSEMENT', 'CHARGE_PAYMENT', 'WAIVE_CHARGES', 'WAIVE_INTEREST', 'WRITEOFF') "
                 + " and (loan_txn.payment_detail_id IS NULL OR payType.is_cash_payment = true) " + " AND acnttrans.id IS NULL ) "
                 + " union (select " + ctm.clientTxnSchema()
                 + " where cli_txn.is_reversed = false and c.id = ? and cli_txn.currency_code = ? " + "and cli_txn.transaction_date "
-                + " between c.start_date and  " + nextDay + " and renum.enum_value IN ('PAY_CHARGE', 'WAIVE_CHARGE') "
+                + " between c.start_date and c.end_date and renum.enum_value IN ('PAY_CHARGE', 'WAIVE_CHARGE') "
                 + " and (cli_txn.payment_detail_id IS NULL OR payType.is_cash_payment = true) ) " + " order by created_date ";
 
         if (searchParameters.hasLimit()) {
@@ -558,7 +561,7 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
 
     private static final class CashierTransactionSummaryMapper implements RowMapper<CashierTransactionTypeTotalsData> {
 
-        public String cashierTxnSummarySchema(String nextDay) {
+        public String cashierTxnSummarySchema() {
 
             final StringBuilder sqlBuilder = new StringBuilder(400);
 
@@ -575,8 +578,9 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
             sqlBuilder.append("    left join m_tellers t on t.id = c.teller_id ");
             sqlBuilder.append("    left join m_office o on o.id = t.office_id ");
             sqlBuilder.append("    left join m_staff s on s.id = c.staff_id ");
+            // Same scoping as retrieveCashierTransactions: the cashier's own rows by cashier_id alone, customer rows by
+            // transaction_date on the allocation's dates.
             sqlBuilder.append("    where txn.cashier_id = ? ");
-            sqlBuilder.append(" AND ((  txn.created_date between c.start_date AND c.end_date ) or txn.txn_type = 101) ");
             sqlBuilder.append(" and   txn.currency_code = ? ");
             sqlBuilder.append(" ) cashier_txns ");
             sqlBuilder.append("    UNION ");
@@ -649,7 +653,7 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
             sqlBuilder.append(" or acnttrans.to_loan_transaction_id = loan_txn.id) ");
             sqlBuilder.append("    where loan_txn.is_reversed = false and c.id = ? ");
             sqlBuilder.append(" and loan.currency_code = ? ");
-            sqlBuilder.append("    and loan_txn.transaction_date between c.start_date and " + nextDay);
+            sqlBuilder.append("    and loan_txn.transaction_date between c.start_date and c.end_date ");
             sqlBuilder.append("    and (loan_txn.payment_detail_id IS NULL OR payType.is_cash_payment = true) ");
             sqlBuilder.append("    AND acnttrans.id IS NULL  ");
             sqlBuilder.append("    ) ");
@@ -682,7 +686,7 @@ public class TellerManagementReadPlatformServiceImpl implements TellerManagement
             sqlBuilder.append(" left join m_payment_type payType on payType.id = payDetails.payment_type_id ");
             sqlBuilder.append("    where cli_txn.is_reversed = false AND c.id = ?    ");
             sqlBuilder.append(" and cli_txn.currency_code = ? ");
-            sqlBuilder.append("    and cli_txn.transaction_date between c.start_date and " + nextDay);
+            sqlBuilder.append("    and cli_txn.transaction_date between c.start_date and c.end_date ");
             sqlBuilder.append(" and (cli_txn.payment_detail_id IS NULL OR payType.is_cash_payment = true)  ");
             sqlBuilder.append("    ) ");
             sqlBuilder.append("    ) txns ");
