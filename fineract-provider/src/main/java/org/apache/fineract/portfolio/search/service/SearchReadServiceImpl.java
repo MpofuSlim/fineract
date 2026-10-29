@@ -21,8 +21,10 @@ package org.apache.fineract.portfolio.search.service;
 import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.fineract.infrastructure.core.data.EnumOptionData;
@@ -38,6 +40,7 @@ import org.apache.fineract.portfolio.loanaccount.data.LoanStatusEnumData;
 import org.apache.fineract.portfolio.loanproduct.data.LoanProductData;
 import org.apache.fineract.portfolio.loanproduct.service.LoanEnumerations;
 import org.apache.fineract.portfolio.loanproduct.service.LoanProductReadPlatformService;
+import org.apache.fineract.portfolio.savings.DepositAccountType;
 import org.apache.fineract.portfolio.savings.data.SavingsAccountStatusEnumData;
 import org.apache.fineract.portfolio.savings.service.SavingsEnumerations;
 import org.apache.fineract.portfolio.search.SearchConstants;
@@ -116,9 +119,9 @@ public class SearchReadServiceImpl implements SearchReadService {
                 left join m_group g ON s.group_id = g.id \
                 left join m_office o on o.id = c.office_id \
                 left join m_savings_product sp on sp.id=s.product_id \
-                where (o.hierarchy IS NULL OR o.hierarchy like :hierarchy) \
+                where (o.hierarchy IS NULL OR o.hierarchy like :hierarchy) %s\
                 and (s.account_no like :search or s.external_id like :search)) \
-                order by s.id desc)""";
+                order by s.id desc)""".formatted(depositTypeCondition(searchConditions));
 
         final String shareMatchSql = """
                 ( (select 'SHARE' as entityType, s.id as entityId, sp.name as entityName, \
@@ -149,10 +152,10 @@ public class SearchReadServiceImpl implements SearchReadService {
                 g.office_id as parentId, o.name as parentName, null as entityMobileNo, \
                 g.status_enum as entityStatusEnum, null as subEntityType, null as parentType \
                 from m_group g join m_office o on o.id = g.office_id \
-                where o.hierarchy like :hierarchy \
+                where o.hierarchy like :hierarchy %s\
                 and (g.account_no like :search or g.display_name like :search \
                 or g.external_id like :search)) \
-                order by g.id desc)""";
+                order by g.id desc)""".formatted(groupLevelCondition(searchConditions));
 
         final StringBuilder sql = new StringBuilder();
 
@@ -164,7 +167,8 @@ public class SearchReadServiceImpl implements SearchReadService {
             sql.append(loanMatchSql).append(union);
         }
 
-        if (searchConditions.isSavingSeach()) {
+        if (searchConditions.isSavingSeach() && (searchConditions.isSavingsDepositRows() || searchConditions.isFixedDepositRows()
+                || searchConditions.isRecurringDepositRows())) {
             sql.append(savingMatchSql).append(union);
         }
 
@@ -176,7 +180,7 @@ public class SearchReadServiceImpl implements SearchReadService {
             sql.append(clientIdentifierMatchSql).append(union);
         }
 
-        if (searchConditions.isGroupSearch()) {
+        if (searchConditions.isGroupSearch() && (searchConditions.isCenterRows() || searchConditions.isGroupRows())) {
             sql.append(groupMatchSql).append(union);
         }
 
@@ -186,6 +190,45 @@ public class SearchReadServiceImpl implements SearchReadService {
         // only get the first 50 rows in case of searcing
         sql.append(" ").append(sqlGenerator.limit(50, 0));
         return sql.toString();
+    }
+
+    /**
+     * Narrows the group search to the kinds of row requested: a center is group level 1 (the entityType CASE of the
+     * group search), every other level is a group. Empty when both are.
+     */
+    private static String groupLevelCondition(final SearchConditions searchConditions) {
+        if (searchConditions.isCenterRows() == searchConditions.isGroupRows()) {
+            return "";
+        }
+        return searchConditions.isCenterRows() ? "and g.level_id = 1 " : "and g.level_id <> 1 ";
+    }
+
+    /**
+     * Narrows the savings search to the deposit types requested. Fixed and recurring deposits are matched by type; a
+     * savings account is any other row of m_savings_account. Empty when all three are.
+     */
+    private static String depositTypeCondition(final SearchConditions searchConditions) {
+        final List<Integer> requestedTermDeposits = new ArrayList<>();
+        final List<Integer> otherTermDeposits = new ArrayList<>();
+        if (searchConditions.isFixedDepositRows()) {
+            requestedTermDeposits.add(DepositAccountType.FIXED_DEPOSIT.getValue());
+        } else {
+            otherTermDeposits.add(DepositAccountType.FIXED_DEPOSIT.getValue());
+        }
+        if (searchConditions.isRecurringDepositRows()) {
+            requestedTermDeposits.add(DepositAccountType.RECURRING_DEPOSIT.getValue());
+        } else {
+            otherTermDeposits.add(DepositAccountType.RECURRING_DEPOSIT.getValue());
+        }
+        if (searchConditions.isSavingsDepositRows()) {
+            return otherTermDeposits.isEmpty() ? "" : "and s.deposit_type_enum not in (" + joined(otherTermDeposits) + ") ";
+        }
+        // no kind requested at all: searchSchema leaves the savings search out
+        return requestedTermDeposits.isEmpty() ? "and 1 = 0 " : "and s.deposit_type_enum in (" + joined(requestedTermDeposits) + ") ";
+    }
+
+    private static String joined(final List<Integer> values) {
+        return values.stream().map(String::valueOf).collect(Collectors.joining(", "));
     }
 
     private static final class SearchMapper implements RowMapper<SearchData> {

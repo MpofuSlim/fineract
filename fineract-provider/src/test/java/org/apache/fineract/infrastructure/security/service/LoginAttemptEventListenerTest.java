@@ -18,11 +18,13 @@
  */
 package org.apache.fineract.infrastructure.security.service;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -39,16 +41,31 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.aop.framework.ProxyFactory;
 import org.springframework.cache.Cache;
 import org.springframework.cache.CacheManager;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.CredentialsExpiredException;
+import org.springframework.security.authentication.DisabledException;
+import org.springframework.security.authentication.InternalAuthenticationServiceException;
+import org.springframework.security.authentication.LockedException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.authentication.event.AuthenticationFailureBadCredentialsEvent;
+import org.springframework.security.authentication.event.AuthenticationFailureCredentialsExpiredEvent;
+import org.springframework.security.authentication.event.AuthenticationFailureDisabledEvent;
+import org.springframework.security.authentication.event.AuthenticationFailureLockedEvent;
+import org.springframework.security.authentication.event.AuthenticationFailureServiceExceptionEvent;
 import org.springframework.security.authentication.event.AuthenticationSuccessEvent;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.User;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @ExtendWith(MockitoExtension.class)
 class LoginAttemptEventListenerTest {
@@ -63,6 +80,8 @@ class LoginAttemptEventListenerTest {
     private Cache usersCache;
     @Mock
     private Cache usersByUsernameCache;
+    @Mock
+    private PlatformTransactionManager transactionManager;
 
     private LoginAttemptEventListener listener;
 
@@ -70,7 +89,8 @@ class LoginAttemptEventListenerTest {
     void setUp() {
         ThreadLocalContextUtil
                 .setTenant(FineractPlatformTenant.builder().id(1L).tenantIdentifier("default").name("default").timezoneId("UTC").build());
-        listener = new LoginAttemptEventListener(configurationDomainService, appUserRepository, cacheManager);
+        listener = new LoginAttemptEventListener(configurationDomainService, appUserRepository, cacheManager,
+                new TransactionTemplate(transactionManager));
     }
 
     @AfterEach
@@ -79,126 +99,197 @@ class LoginAttemptEventListenerTest {
     }
 
     @Test
-    void shouldIncrementFailedAttemptsAndLockAccountWhenMaxReached() {
-        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(true);
-        when(configurationDomainService.retrieveMaxLoginRetries()).thenReturn(3);
-        when(cacheManager.getCache("users")).thenReturn(usersCache);
-        when(cacheManager.getCache("usersByUsername")).thenReturn(usersByUsernameCache);
+    void badCredentialsAreReadWithoutALockThenCountedAndLockedInOneTransaction() {
+        givenLockoutEnabled(3);
+        givenCaches();
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenReturn(1);
 
-        AppUser user = buildUser("user");
-        user.updateLoginRetryLimitEnabled(true);
-        when(appUserRepository.findAppUserByName("user")).thenReturn(user);
+        listener.onAuthenticationEvent(badCredentials("user"));
 
-        AuthenticationFailureBadCredentialsEvent failureEvent = new AuthenticationFailureBadCredentialsEvent(
-                new UsernamePasswordAuthenticationToken("user", "bad"), new BadCredentialsException("bad"));
-
-        listener.onAuthenticationFailure(failureEvent);
-        listener.onAuthenticationFailure(failureEvent);
-        listener.onAuthenticationFailure(failureEvent);
-
-        assertEquals(3, user.getFailedLoginAttempts());
-        assertFalse(user.isAccountNonLocked());
-        verify(appUserRepository, times(3)).saveAndFlush(user);
+        InOrder inOrder = inOrder(transactionManager, appUserRepository);
+        inOrder.verify(appUserRepository).findIdOfUserCountingFailedLogins("user");
+        inOrder.verify(transactionManager).getTransaction(any());
+        inOrder.verify(appUserRepository).incrementFailedLoginAttempts(17L);
+        inOrder.verify(appUserRepository).lockWhenFailedLoginAttemptsReach(17L, 3);
+        inOrder.verify(transactionManager).commit(any());
+        verify(usersCache).clear();
+        verify(usersByUsernameCache).clear();
     }
 
     @Test
-    void shouldResetFailedAttemptsOnSuccessfulLogin() {
-        AppUser user = buildUser("user");
-        user.updateLoginRetryLimitEnabled(true);
-        user.registerFailedLoginAttempt(10);
-        user.registerFailedLoginAttempt(10);
-        when(cacheManager.getCache("users")).thenReturn(usersCache);
-        when(cacheManager.getCache("usersByUsername")).thenReturn(usersByUsernameCache);
+    void anAccountThatIsNotCountedIsNeverUpdatedAndOpensNoTransaction() {
+        // unknown user, login retries disabled for it (the middleware's service accounts), or already locked. On InnoDB
+        // an UPDATE naming it would lock its row and queue behind - and in front of - its in-flight transactions.
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(null);
 
-        AuthenticationSuccessEvent successEvent = new AuthenticationSuccessEvent(
-                new UsernamePasswordAuthenticationToken(user, "pass", user.getAuthorities()));
+        listener.onAuthenticationEvent(badCredentials("user"));
 
-        listener.onAuthenticationSuccess(successEvent);
-
-        assertEquals(0, user.getFailedLoginAttempts());
-        assertTrue(user.isAccountNonLocked());
-        verify(appUserRepository).saveAndFlush(user);
+        verify(appUserRepository, never()).incrementFailedLoginAttempts(anyLong());
+        verify(appUserRepository, never()).lockWhenFailedLoginAttemptsReach(anyLong(), anyInt());
+        verifyNoInteractions(transactionManager, cacheManager);
     }
 
     @Test
-    void shouldNotUpdateWhenLimitDisabled() {
-        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(false);
+    void anAccountWhoseFlagsChangedSinceTheReadIsNotLockedAndTheCachesAreKept() {
+        // its retries were disabled, or it was locked, between the read and the increment: the increment matches no row
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenReturn(0);
 
-        AuthenticationFailureBadCredentialsEvent failureEvent = new AuthenticationFailureBadCredentialsEvent(
-                new UsernamePasswordAuthenticationToken("user", "bad"), new BadCredentialsException("bad"));
+        listener.onAuthenticationEvent(badCredentials("user"));
 
-        listener.onAuthenticationFailure(failureEvent);
-
-        verifyNoInteractions(appUserRepository);
+        verify(appUserRepository, never()).lockWhenFailedLoginAttemptsReach(anyLong(), anyInt());
+        verify(transactionManager).commit(any());
         verifyNoInteractions(cacheManager);
     }
 
     @Test
-    void shouldNotUpdateWhenLoginRetriesDisabledForUser() {
-        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(true);
-        when(configurationDomainService.retrieveMaxLoginRetries()).thenReturn(3);
+    void nothingIsCountedWhileTheGlobalLimitIsDisabled() {
+        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(false);
 
-        AppUser user = buildUser("user");
-        user.updateLoginRetryLimitEnabled(false);
-        when(appUserRepository.findAppUserByName("user")).thenReturn(user);
+        listener.onAuthenticationEvent(badCredentials("user"));
 
-        AuthenticationFailureBadCredentialsEvent failureEvent = new AuthenticationFailureBadCredentialsEvent(
-                new UsernamePasswordAuthenticationToken("user", "bad"), new BadCredentialsException("bad"));
-
-        listener.onAuthenticationFailure(failureEvent);
-
-        assertEquals(0, user.getFailedLoginAttempts());
-        assertTrue(user.isAccountNonLocked());
-        verify(appUserRepository, times(0)).saveAndFlush(user);
+        verifyNoInteractions(appUserRepository, transactionManager, cacheManager);
     }
 
     @Test
-    void shouldNotLockSystemUser() {
-        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(true);
-        when(configurationDomainService.retrieveMaxLoginRetries()).thenReturn(3);
+    void theSystemUserIsNeverCounted() {
+        givenLockoutEnabled(3);
 
-        AppUser user = buildUser("system");
-        user.updateLoginRetryLimitEnabled(true);
-        when(appUserRepository.findAppUserByName("system")).thenReturn(user);
+        listener.onAuthenticationEvent(badCredentials("system"));
 
-        AuthenticationFailureBadCredentialsEvent failureEvent = new AuthenticationFailureBadCredentialsEvent(
-                new UsernamePasswordAuthenticationToken("system", "bad"), new BadCredentialsException("bad"));
-
-        listener.onAuthenticationFailure(failureEvent);
-
-        assertEquals(0, user.getFailedLoginAttempts());
-        assertTrue(user.isAccountNonLocked());
-        verify(appUserRepository, times(0)).saveAndFlush(user);
+        verifyNoInteractions(appUserRepository, transactionManager, cacheManager);
     }
 
     @Test
-    void shouldLockUserWithCannotChangePasswordWhenEnabled() {
+    void onlyBadCredentialsCount() {
+        // none of these is a wrong password: a fault while loading the user must never lock an account that presented
+        // the right one
+        UsernamePasswordAuthenticationToken token = new UsernamePasswordAuthenticationToken("user", "password");
+        for (Object event : List.of(
+                new AuthenticationFailureServiceExceptionEvent(token, new InternalAuthenticationServiceException("database down")),
+                new AuthenticationFailureLockedEvent(token, new LockedException("locked")),
+                new AuthenticationFailureDisabledEvent(token, new DisabledException("disabled")),
+                new AuthenticationFailureCredentialsExpiredEvent(token, new CredentialsExpiredException("expired")))) {
+            listener.onAuthenticationEvent(event);
+        }
+
+        verifyNoInteractions(configurationDomainService, appUserRepository, transactionManager, cacheManager);
+    }
+
+    @Test
+    void successResetsTheCountWithATargetedStatementNotASaveOfThePrincipal() {
+        givenCaches();
+        AppUser user = buildUser("user", 2);
+
+        listener.onAuthenticationEvent(success(user));
+
+        verify(appUserRepository).resetFailedLoginAttempts(17L);
+        verify(appUserRepository, never()).save(any());
+        verify(appUserRepository, never()).saveAndFlush(any());
+        verify(transactionManager).commit(any());
+        verify(usersCache).clear();
+        verify(usersByUsernameCache).clear();
+    }
+
+    @Test
+    void successWithNoFailedAttemptsOpensNoTransactionAndTouchesNoDatabase() {
+        // every Basic-auth API request authenticates. Through a transactional proxy, so a @Transactional added to the
+        // listener (which would open a transaction and take a connection before the zero-attempt return) fails here.
+        ProxyFactory proxyFactory = new ProxyFactory(listener);
+        proxyFactory.setProxyTargetClass(true);
+        proxyFactory.addAdvice(new TransactionInterceptor(transactionManager, new AnnotationTransactionAttributeSource()));
+        LoginAttemptEventListener proxied = (LoginAttemptEventListener) proxyFactory.getProxy();
+
+        proxied.onAuthenticationEvent(success(buildUser("user", 0)));
+
+        verifyNoInteractions(transactionManager, appUserRepository, configurationDomainService, cacheManager);
+    }
+
+    @Test
+    void withoutATenantNothingIsTouched() {
+        AppUser user = buildUser("user", 2);
+        ThreadLocalContextUtil.reset();
+
+        listener.onAuthenticationEvent(badCredentials("user"));
+        listener.onAuthenticationEvent(success(user));
+
+        verifyNoInteractions(configurationDomainService, appUserRepository, transactionManager, cacheManager);
+    }
+
+    // The bookkeeping runs inside ProviderManager.authenticate: an exception escaping it would replace the
+    // authentication's own result, e.g. turn a 401 into a 500.
+
+    @Test
+    void aConfigurationFaultNeverEscapes() {
+        when(configurationDomainService.isMaxLoginRetriesEnabled()).thenThrow(new IllegalStateException("no configuration"));
+
+        assertDoesNotThrow(() -> listener.onAuthenticationEvent(badCredentials("user")));
+    }
+
+    @Test
+    void aDatabaseFaultWhileReadingTheAccountNeverEscapes() {
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenThrow(new DataAccessResourceFailureException("database down"));
+
+        assertDoesNotThrow(() -> listener.onAuthenticationEvent(badCredentials("user")));
+        verifyNoInteractions(transactionManager);
+    }
+
+    @Test
+    void aDatabaseFaultWhileCountingNeverEscapes() {
+        givenLockoutEnabled(3);
+        when(appUserRepository.findIdOfUserCountingFailedLogins("user")).thenReturn(17L);
+        when(appUserRepository.incrementFailedLoginAttempts(17L)).thenThrow(new DataAccessResourceFailureException("database down"));
+
+        assertDoesNotThrow(() -> listener.onAuthenticationEvent(badCredentials("user")));
+        verify(transactionManager).rollback(any());
+    }
+
+    @Test
+    void aDatabaseFaultWhileResettingNeverEscapes() {
+        when(appUserRepository.resetFailedLoginAttempts(17L)).thenThrow(new DataAccessResourceFailureException("database down"));
+
+        assertDoesNotThrow(() -> listener.onAuthenticationEvent(success(buildUser("user", 2))));
+    }
+
+    @Test
+    void ignoresOtherEvents() {
+        listener.onAuthenticationEvent("not an authentication event");
+
+        verifyNoInteractions(configurationDomainService, appUserRepository, transactionManager, cacheManager);
+    }
+
+    private void givenLockoutEnabled(int maxRetries) {
         when(configurationDomainService.isMaxLoginRetriesEnabled()).thenReturn(true);
-        when(configurationDomainService.retrieveMaxLoginRetries()).thenReturn(1);
+        when(configurationDomainService.retrieveMaxLoginRetries()).thenReturn(maxRetries);
+    }
+
+    private void givenCaches() {
         when(cacheManager.getCache("users")).thenReturn(usersCache);
         when(cacheManager.getCache("usersByUsername")).thenReturn(usersByUsernameCache);
-
-        AppUser user = buildUser("api-user", true);
-        user.updateLoginRetryLimitEnabled(true);
-        when(appUserRepository.findAppUserByName("api-user")).thenReturn(user);
-
-        AuthenticationFailureBadCredentialsEvent failureEvent = new AuthenticationFailureBadCredentialsEvent(
-                new UsernamePasswordAuthenticationToken("api-user", "bad"), new BadCredentialsException("bad"));
-
-        listener.onAuthenticationFailure(failureEvent);
-
-        assertEquals(1, user.getFailedLoginAttempts());
-        assertFalse(user.isAccountNonLocked());
-        verify(appUserRepository, times(1)).saveAndFlush(user);
     }
 
-    private AppUser buildUser(String username) {
-        return buildUser(username, false);
+    private static AuthenticationFailureBadCredentialsEvent badCredentials(String username) {
+        return new AuthenticationFailureBadCredentialsEvent(new UsernamePasswordAuthenticationToken(username, "bad"),
+                new BadCredentialsException("bad"));
     }
 
-    private AppUser buildUser(String username, boolean cannotChangePassword) {
+    private static AuthenticationSuccessEvent success(AppUser user) {
+        return new AuthenticationSuccessEvent(new UsernamePasswordAuthenticationToken(user, "pass", List.of()));
+    }
+
+    private static AppUser buildUser(String username, int failedLoginAttempts) {
         Office office = mock(Office.class);
         User springUser = new User(username, "pass", true, true, true, true, List.of(new SimpleGrantedAuthority("ALL_FUNCTIONS")));
-        return new AppUser(office, springUser, new HashSet<>(), "user@example.com", "First", "Last", null, false, cannotChangePassword);
+        AppUser user = new AppUser(office, springUser, new HashSet<>(), "user@example.com", "First", "Last", null, false, false);
+        user.setId(17L);
+        user.updateLoginRetryLimitEnabled(true);
+        for (int i = 0; i < failedLoginAttempts; i++) {
+            user.registerFailedLoginAttempt(100);
+        }
+        return user;
     }
 }

@@ -44,6 +44,7 @@ import org.apache.fineract.infrastructure.security.data.PlatformRequestLog;
 import org.apache.fineract.infrastructure.security.filter.TenantAwareBasicAuthenticationFilter;
 import org.apache.fineract.infrastructure.security.filter.TwoFactorAuthenticationFilter;
 import org.apache.fineract.infrastructure.security.service.AuthTenantDetailsService;
+import org.apache.fineract.infrastructure.security.service.LoginAttemptEventListener;
 import org.apache.fineract.infrastructure.security.service.PlatformUserDetailsChecker;
 import org.apache.fineract.infrastructure.security.service.TemporaryPasswordAwareAuthenticationProvider;
 import org.apache.fineract.infrastructure.security.service.TenantAwareJpaPlatformUserDetailsService;
@@ -57,8 +58,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.DefaultAuthenticationEventPublisher;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
 import org.springframework.security.authorization.AuthorizationManager;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
@@ -76,6 +79,7 @@ import org.springframework.security.web.servlet.util.matcher.PathPatternRequestM
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+import org.springframework.web.util.pattern.PathPatternParser;
 
 @Configuration
 @ConditionalOnProperty("fineract.security.basicauth.enabled")
@@ -86,6 +90,11 @@ public class SecurityConfig {
     private static final String ALL_FUNCTIONS = "ALL_FUNCTIONS";
     private static final String ALL_FUNCTIONS_READ = "ALL_FUNCTIONS_READ";
     private static final String ALL_FUNCTIONS_WRITE = "ALL_FUNCTIONS_WRITE";
+    private static final PathPatternRequestMatcher.Builder CASE_INSENSITIVE_API_MATCHER = PathPatternRequestMatcher
+            .withPathPatternParser(caseInsensitivePathPatternParser());
+    private static final String DOCUMENTS_PATH = "/api/*/*/*/documents/**";
+    private static final String IMAGES_PATH = "/api/*/*/*/images/**";
+    private static final String TWO_FACTOR_AUTHENTICATED = "TWOFACTOR_AUTHENTICATED";
 
     @Autowired
     private ApplicationContext applicationContext;
@@ -119,6 +128,29 @@ public class SecurityConfig {
     private ProgressiveLoanModelCheckerFilter progressiveLoanModelCheckerFilter;
     @Autowired
     private PlatformUserDetailsChecker platformUserDetailsChecker;
+    @Autowired
+    private LoginAttemptEventListener loginAttemptEventListener;
+
+    private static PathPatternParser caseInsensitivePathPatternParser() {
+        PathPatternParser parser = new PathPatternParser();
+        parser.setCaseSensitive(false);
+        return parser;
+    }
+
+    /**
+     * hasAnyAuthority, plus the second factor when two-factor authentication is enabled, as the catch-all "/api/**"
+     * rule requires it. TwoFactorAuthenticationFilter lets a request without a two-factor token through without the
+     * TWOFACTOR_AUTHENTICATED authority and leaves the refusal to the rules, so a plain hasAnyAuthority rule that takes
+     * a path off the catch-all opens it to a password-only session.
+     */
+    private AuthorizationManager<RequestAuthorizationContext> hasAnyAuthorityWithSecondFactor(final String... authorities) {
+        final AuthorizationManager<RequestAuthorizationContext> hasAnyAuthority = AuthorityAuthorizationManager
+                .hasAnyAuthority(authorities);
+        if (!fineractProperties.getSecurity().getTwoFactor().isEnabled()) {
+            return hasAnyAuthority;
+        }
+        return allOf(hasAnyAuthority, hasAuthority(TWO_FACTOR_AUTHENTICATED));
+    }
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
@@ -129,7 +161,7 @@ public class SecurityConfig {
             authorizationManagers.add(fullyAuthenticated());
 
             if (fineractProperties.getSecurity().getTwoFactor().isEnabled()) {
-                authorizationManagers.add(hasAuthority("TWOFACTOR_AUTHENTICATED"));
+                authorizationManagers.add(hasAuthority(TWO_FACTOR_AUTHENTICATED));
             }
 
             auth.requestMatchers(API_MATCHER.matcher(HttpMethod.OPTIONS, "/api/**")).permitAll()
@@ -201,78 +233,44 @@ public class SecurityConfig {
                     .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_SAVINGNOTE")
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/groups/*/notes"))
                     .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_GROUPNOTE")
-                    // document: clients
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/clients/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/clients/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/clients/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/clients/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: client_identifiers
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/client_identifiers/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/client_identifiers/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/client_identifiers/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/client_identifiers/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: staff
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/staff/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/staff/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/staff/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/staff/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: loans
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/loans/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/loans/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/loans/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/loans/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: savings
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/savings/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/savings/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/savings/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/savings/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: groups
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/groups/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/groups/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/groups/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/groups/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // document: import
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/import/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/import/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/import/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/import/*/documents"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT")
-                    // image: clients
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/clients/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/clients/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_CLIENTIMAGE")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/clients/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CLIENTIMAGE")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/clients/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_CLIENTIMAGE")
+                    // document: every entity type. DocumentApiResource serves /v1/{entityType}/{entityId}/documents for
+                    // ANY entityType (there is no whitelist), plus /{documentId} and /{documentId}/attachment below it.
+                    // Exact-depth per-entity matchers left those sub-paths (and every unlisted entity type) on the
+                    // authenticated-only "/api/**" rule. "/**" also matches the collection path and a trailing slash.
+                    // HEAD runs the GET method (Jersey) and no other rule matches it. These rules and the image rules
+                    // took paths off the "/api/**" rule, so they keep its second factor.
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, DOCUMENTS_PATH),
+                            API_MATCHER.matcher(HttpMethod.HEAD, DOCUMENTS_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT"))
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, DOCUMENTS_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_DOCUMENT"))
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, DOCUMENTS_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_DOCUMENT"))
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, DOCUMENTS_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_DOCUMENT"))
+                    // image: ImagesApiResource serves /v1/{entityType}/{entityId}/images, and Jersey matches the
+                    // {entityType} template - and the image services accept it - in ANY case, so case-sensitive
+                    // "/api/*/clients/*/images" rules left "/api/v1/CLIENTS/1/images" on the authenticated-only
+                    // "/api/**" rule. So reads are entity-type independent (as documents are), the per-entity write
+                    // rules ignore case, and an image under any other entity type is written by the all-functions
+                    // authorities only. "/**" also covers the trailing-slash form; HEAD runs the GET method.
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, IMAGES_PATH), API_MATCHER.matcher(HttpMethod.HEAD, IMAGES_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.POST, "/api/*/clients/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_CLIENTIMAGE"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.PUT, "/api/*/clients/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CLIENTIMAGE"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/clients/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_CLIENTIMAGE"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.POST, "/api/*/staff/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_STAFFIMAGE"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.PUT, "/api/*/staff/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_STAFFIMAGE"))
+                    .requestMatchers(CASE_INSENSITIVE_API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/staff/*/images/**"))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_STAFFIMAGE"))
+                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, IMAGES_PATH), API_MATCHER.matcher(HttpMethod.PUT, IMAGES_PATH),
+                            API_MATCHER.matcher(HttpMethod.DELETE, IMAGES_PATH))
+                    .access(hasAnyAuthorityWithSecondFactor(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE))
                     // collateral: clients
                     // NOTE: the "_CLIENT_COLLATERAL_PRODUCT" suffix is the legacy permission naming kept for
                     // backwards compatibility (entity_name = CLIENT_COLLATERAL_PRODUCT in the permission table)
@@ -286,15 +284,6 @@ public class SecurityConfig {
                     .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_CLIENT_COLLATERAL_PRODUCT")
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/clients/*/collaterals/*"))
                     .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_CLIENT_COLLATERAL_PRODUCT")
-                    // image: staff
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/staff/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_DOCUMENT")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.POST, "/api/*/staff/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "CREATE_STAFFIMAGE")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.PUT, "/api/*/staff/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "UPDATE_STAFFIMAGE")
-                    .requestMatchers(API_MATCHER.matcher(HttpMethod.DELETE, "/api/*/staff/*/images"))
-                    .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE, "DELETE_STAFFIMAGE")
                     // collateral: products
                     .requestMatchers(API_MATCHER.matcher(HttpMethod.GET, "/api/*/collateral-management"))
                     .hasAnyAuthority(ALL_FUNCTIONS, ALL_FUNCTIONS_READ, "READ_COLLATERAL_PRODUCT")
@@ -518,6 +507,13 @@ public class SecurityConfig {
     public AuthenticationManager authenticationManagerBean() throws Exception {
         ProviderManager providerManager = new ProviderManager(authProvider());
         providerManager.setEraseCredentialsAfterAuthentication(false);
+        // Without a publisher ProviderManager uses a no-op one, so no AuthenticationSuccess/Failure event ever reached
+        // LoginAttemptEventListener and the login-retry lockout could never fire. Spring Security's exception-to-event
+        // mapping, delivered straight to the listener on the authenticating thread: through the application context,
+        // the asynchronous multicaster would queue a FineractEvent pool task on every API request (Spring Security's
+        // DelegatingApplicationListener runs asynchronously) and run listeners without the tenant.
+        providerManager
+                .setAuthenticationEventPublisher(new DefaultAuthenticationEventPublisher(loginAttemptEventListener::onAuthenticationEvent));
         return providerManager;
     }
 

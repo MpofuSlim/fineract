@@ -144,6 +144,10 @@ public class SynchronousCommandProcessingService implements CommandProcessingSer
     private CommandProcessingResult executeCommand(final CommandWrapper wrapper, final JsonCommand command,
             final boolean isApprovedByChecker, CommandSource commandSource, AppUser user, boolean isEnclosingTransaction) {
 
+        // Decided before processing, not from the status in the catch block: processCommand marks the approved command
+        // PROCESSED before its transaction commits, so a failure at commit reaches the catch block no longer awaiting
+        // approval.
+        final boolean approvingParkedCommand = commandSource.isAwaitingApproval();
         final CommandProcessingResult result;
         try {
             result = commandSourceService.processCommand(findCommandHandler(wrapper), command, commandSource, user, isApprovedByChecker);
@@ -154,6 +158,11 @@ public class SynchronousCommandProcessingService implements CommandProcessingSer
             commandSource.setResultStatusCode(statusCode);
             commandSource.setResult(errorInfo.getMessage());
             if (statusCode != SC_OK) {
+                if (approvingParkedCommand) {
+                    // the approval of a parked command failed: the row leaves the inbox as a failed command, and failed
+                    // rows carry no office (visible to head office only), as before the parked row was stamped with one
+                    commandSource.clearOfficeForAudit();
+                }
                 commandSource.setStatus(ERROR);
             }
             if (!isEnclosingTransaction) { // TODO: temporary solution

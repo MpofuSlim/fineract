@@ -55,6 +55,9 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
@@ -75,6 +78,8 @@ import org.apache.fineract.infrastructure.documentmanagement.data.ImageCreateRes
 import org.apache.fineract.infrastructure.documentmanagement.data.ImageDeleteRequest;
 import org.apache.fineract.infrastructure.documentmanagement.data.ImageDeleteResponse;
 import org.apache.fineract.infrastructure.documentmanagement.service.ImageReadPlatformService;
+import org.apache.fineract.infrastructure.security.exception.NoAuthorizationException;
+import org.apache.fineract.infrastructure.security.service.PlatformSecurityContext;
 import org.apache.fineract.util.StreamResponseUtil;
 import org.glassfish.jersey.media.multipart.FormDataBodyPart;
 import org.glassfish.jersey.media.multipart.FormDataContentDisposition;
@@ -89,6 +94,14 @@ import org.springframework.stereotype.Component;
 @Path("/v1/{entityType}/{entityId}/images")
 public class ImagesApiResource {
 
+    // Checked here as well as in SecurityConfig: Jersey matches {entityType} in any case and the image services accept
+    // it case-insensitively, so a request matcher that misses a spelling ("/api/v1/CLIENTS/1/images") cannot expose,
+    // replace or delete an image. Same codes as the SecurityConfig rules.
+    private static final String READ_PERMISSION_RESOURCE = "DOCUMENT";
+    private static final String ALL_FUNCTIONS = "ALL_FUNCTIONS";
+    private static final String ALL_FUNCTIONS_WRITE = "ALL_FUNCTIONS_WRITE";
+
+    private final PlatformSecurityContext context;
     private final ImageReadPlatformService imageReadPlatformService;
     private final CommandDispatcher dispatcher;
     private final ImageResizeContentProcessor imageResizeContentProcessor;
@@ -105,6 +118,8 @@ public class ImagesApiResource {
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId, @QueryParam(IMAGE_API_PARAM_MAX_WIDTH) final Integer maxWidth,
             @QueryParam(IMAGE_API_PARAM_MAX_HEIGHT) final Integer maxHeight, @QueryParam(IMAGE_API_PARAM_OUTPUT) String output,
             @HeaderParam(ACCEPT) String acceptHeader) {
+
+        context.authenticatedUser().validateHasReadPermission(READ_PERMISSION_RESOURCE);
 
         // TODO: pass resize information here and do all the processing in the service
         final var content = imageReadPlatformService.retrieveImage(entityName, entityId);
@@ -163,6 +178,13 @@ public class ImagesApiResource {
             @FormDataParam(DOCUMENT_API_PARAM_FILE) final FormDataContentDisposition fileDetails,
             @FormDataParam(DOCUMENT_API_PARAM_FILE) final FormDataBodyPart filePart) {
 
+        validateHasWritePermission("CREATE", entityType);
+        return createImageFromMultipart(entityType, entityId, fileSize, is, fileDetails, filePart);
+    }
+
+    private ImageCreateResponse createImageFromMultipart(final String entityType, final Long entityId, final Long fileSize,
+            final InputStream is, final FormDataContentDisposition fileDetails, final FormDataBodyPart filePart) {
+
         fileUploadValidator.validate(fileSize, is, fileDetails, filePart);
 
         final var command = new ImageCreateCommand();
@@ -180,6 +202,12 @@ public class ImagesApiResource {
     @Consumes({ MediaType.TEXT_PLAIN, MediaType.TEXT_HTML, MediaType.APPLICATION_JSON })
     public ImageCreateResponse createImage(@PathParam(DOCUMENT_API_PARAM_ENTITY_TYPE) final String entityType,
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId, final InputStream body) {
+
+        validateHasWritePermission("CREATE", entityType);
+        return createImageFromDataUrl(entityType, entityId, body);
+    }
+
+    private ImageCreateResponse createImageFromDataUrl(final String entityType, final Long entityId, final InputStream body) {
 
         requireNonNull(body, "Missing input stream");
 
@@ -203,19 +231,23 @@ public class ImagesApiResource {
             @FormDataParam(DOCUMENT_API_PARAM_FILE) final InputStream inputStream,
             @FormDataParam(DOCUMENT_API_PARAM_FILE) final FormDataContentDisposition fileDetails,
             @FormDataParam(DOCUMENT_API_PARAM_FILE) final FormDataBodyPart bodyPart) {
-        return createImage(entityName, entityId, fileSize, inputStream, fileDetails, bodyPart);
+        validateHasWritePermission("UPDATE", entityName);
+        return createImageFromMultipart(entityName, entityId, fileSize, inputStream, fileDetails, bodyPart);
     }
 
     @PUT
     @Consumes({ MediaType.TEXT_PLAIN, MediaType.TEXT_HTML, MediaType.APPLICATION_JSON })
     public ImageCreateResponse updateImage(@PathParam(DOCUMENT_API_PARAM_ENTITY_TYPE) final String entityName,
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId, final InputStream body) {
-        return createImage(entityName, entityId, body);
+        validateHasWritePermission("UPDATE", entityName);
+        return createImageFromDataUrl(entityName, entityId, body);
     }
 
     @DELETE
     public ImageDeleteResponse deleteImage(@PathParam(DOCUMENT_API_PARAM_ENTITY_TYPE) final String entityType,
             @PathParam(DOCUMENT_API_PARAM_ENTITY_ID) final Long entityId) {
+
+        validateHasWritePermission("DELETE", entityType);
 
         final var command = new ImageDeleteCommand();
 
@@ -224,5 +256,22 @@ public class ImagesApiResource {
         final Supplier<ImageDeleteResponse> response = dispatcher.dispatch(command);
 
         return response.get();
+    }
+
+    /**
+     * The SecurityConfig rule for the action: ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE or {action}_CLIENTIMAGE /
+     * {action}_STAFFIMAGE, the entity type matched in any case as the image services match it. No image permission
+     * exists for any other entity type, so only the all-functions authorities write those.
+     */
+    private void validateHasWritePermission(final String action, final String entityType) {
+        final List<String> allowed = new ArrayList<>(List.of(ALL_FUNCTIONS, ALL_FUNCTIONS_WRITE));
+        if ("clients".equalsIgnoreCase(entityType)) {
+            allowed.add(action + "_CLIENTIMAGE");
+        } else if ("staff".equalsIgnoreCase(entityType)) {
+            allowed.add(action + "_STAFFIMAGE");
+        }
+        if (!context.authenticatedUser().hasAnyPermission(allowed)) {
+            throw new NoAuthorizationException("User has no authority to " + action.toLowerCase(Locale.ROOT) + " images");
+        }
     }
 }

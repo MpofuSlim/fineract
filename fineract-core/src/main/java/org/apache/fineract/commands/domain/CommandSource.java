@@ -215,6 +215,30 @@ public class CommandSource extends AbstractPersistableCustom<Long> {
         return checker != null && isRejected();
     }
 
+    /**
+     * Stamps a command parked for checker approval with the office its (rolled back) execution was scoped to. office_id
+     * is what the audit and Checker Inbox queries scope on, so a parked row without it is visible to head office only.
+     * <p>
+     * Only the office, unlike {@link #updateForAudit(CommandProcessingResult)}: every other id on this row is read back
+     * by approveEntry as the input of the re-executed command, and the rolled back result can name entities that no
+     * longer exist (e.g. the new transaction of a loan transaction adjustment, whose re-execution reads the transaction
+     * to adjust from resource_id). The office id is only ever an audit stamp.
+     */
+    public void updateOfficeForAudit(final CommandProcessingResult result) {
+        if (result != null && result.getOfficeId() != null) {
+            this.officeId = result.getOfficeId();
+        }
+    }
+
+    /**
+     * Drops the office {@link #updateOfficeForAudit(CommandProcessingResult)} stamped on a parked command, when its
+     * approval fails. A parked row is created without one (CommandWrapperBuilder never sets an office), so this returns
+     * the failed row to exactly what a failed command always carried.
+     */
+    public void clearOfficeForAudit() {
+        this.officeId = null;
+    }
+
     public void updateForAudit(final CommandProcessingResult result) {
         this.officeId = result.getOfficeId();
         this.groupId = result.getGroupId();

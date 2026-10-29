@@ -46,11 +46,10 @@ import org.apache.fineract.infrastructure.security.service.SpringSecurityPlatfor
 import org.apache.fineract.useradministration.data.RoleData;
 import org.apache.fineract.useradministration.domain.AppUser;
 import org.apache.fineract.useradministration.domain.Role;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.stereotype.Component;
@@ -71,8 +70,9 @@ public class AuthenticationApiResource {
         public String password;
     }
 
-    @Qualifier("customAuthenticationProvider")
-    private final DaoAuthenticationProvider customAuthenticationProvider;
+    // The AuthenticationManager (not the DaoAuthenticationProvider behind it) so that a login here publishes the same
+    // AuthenticationSuccess/Failure events as Basic auth does, which the login-retry lockout listens to.
+    private final AuthenticationManager authenticationManager;
     private final ToApiJsonSerializer<AuthenticatedUserData> apiJsonSerializerService;
     private final SpringSecurityPlatformSecurityContext springSecurityPlatformSecurityContext;
 
@@ -98,7 +98,7 @@ public class AuthenticationApiResource {
         }
 
         final Authentication authentication = new UsernamePasswordAuthenticationToken(request.username, request.password);
-        final Authentication authenticationCheck = this.customAuthenticationProvider.authenticate(authentication);
+        final Authentication authenticationCheck = this.authenticationManager.authenticate(authentication);
 
         final Collection<String> permissions = new ArrayList<>();
         AuthenticatedUserData authenticatedUserData = new AuthenticatedUserData().setUsername(request.username).setPermissions(permissions);

@@ -146,6 +146,9 @@ public class CommandSourceService {
                             "Maker-checker command can not be sanitized, please change the permission configuration", permission);
                 }
                 commandSource.markAsAwaitingApproval();
+                // the parked row is persisted from this instance by the caller (saveResultNewTransaction); without the
+                // office a branch checker's inbox never shows it
+                commandSource.updateOfficeForAudit(result);
                 throw new RollbackTransactionNotApprovedException(commandSource.getId(), commandSource.getResourceId());
             }
         }

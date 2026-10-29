@@ -59,6 +59,11 @@ dependencies {
     annotationProcessor 'org.projectlombok:lombok'
     annotationProcessor 'org.mapstruct:mapstruct-processor'
     implementation('org.apache.commons:commons-csv'){}
+    // AppUser (fineract-core) is a statically woven EclipseLink entity: calling its permission checks
+    // (DocumentApiResource) needs the woven-in EclipseLink types on the compile classpath, as in the other modules
+    implementation('org.eclipse.persistence:org.eclipse.persistence.jpa') {
+        exclude group: 'org.eclipse.persistence', module: 'jakarta.persistence'
+    }
     implementation ('software.amazon.awssdk:s3') {
     }
     implementation ('software.amazon.awssdk:auth') {
