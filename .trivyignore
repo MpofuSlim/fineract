@@ -11,4 +11,21 @@
 # FIXABLE vulnerabilities ever gate the push — a red gate means an upgrade
 # exists and should usually just be taken.
 
-# (no waivers yet)
+#
+# The exp: date makes Trivy honour a waiver only until its review date, so an
+# expired one trips the gate instead of lingering.
+
+# spring-webmvc 6.2.19: XsltView remote code execution (CVE-2026-47884) and
+# Server-Sent Events stream corruption with view rendering (CVE-2026-47890).
+# Both CRITICAL, fixed only on Spring Framework 7.0 (7.0.9); 6.2.19 is the last
+# 6.2 release, so the real fix is the Spring Boot 4 migration.
+# Unreachable here: Fineract serves its API through Jersey. Its one Spring MVC
+# controller (fineract-security LoginController) returns JSON. No source file
+# uses XsltView, ModelAndView, SseEmitter or ResponseBodyEmitter, and nothing
+# configures a ViewResolver or an XSLT stylesheet (grep, 29 Oct 2026).
+# Re-check at review: a view, an emitter or an XSLT resource added since
+# makes these reachable, and the waiver must go.
+# owner: mpofuslim
+# review by: 2027-01-31
+CVE-2026-47884 exp:2027-01-31
+CVE-2026-47890 exp:2027-01-31

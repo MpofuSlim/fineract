@@ -30,7 +30,7 @@ dependencyManagement {
         mavenBom 'io.opentelemetry:opentelemetry-bom:1.62.0'
         mavenBom 'org.jetbrains.kotlin:kotlin-bom:2.3.21'
         mavenBom 'org.junit:junit-bom:5.14.4'
-        mavenBom 'com.fasterxml.jackson:jackson-bom:2.21.4'
+        mavenBom 'com.fasterxml.jackson:jackson-bom:2.21.8'
         mavenBom 'io.cucumber:cucumber-bom:7.34.3'
         mavenBom 'org.mockito:mockito-bom:5.23.0'
         mavenBom 'software.amazon.awssdk:bom:2.44.4'
@@ -51,7 +51,8 @@ dependencyManagement {
         dependency 'org.codehaus.janino:janino:3.1.12'
 
         dependency 'org.eclipse.persistence:org.eclipse.persistence.jpa:4.0.9'
-        dependency 'com.google.guava:guava:33.6.0-jre'
+        // 33.7.2 fixes CVE-2026-102554 (denial of service in deserialization).
+        dependency 'com.google.guava:guava:33.7.2-jre'
         dependency 'com.google.code.gson:gson:2.14.0'
         dependency 'com.google.googlejavaformat:google-java-format:1.35.0'
         dependency 'org.apache.commons:commons-collections4:4.5.0'
@@ -262,11 +263,12 @@ dependencyManagement {
         // imported BOM still manages the family at 2.21.2, and with the
         // dependency-management plugin an explicit entry is the only pin that
         // beats every BOM (verified: the image shipped 2.21.2 even with
-        // jackson-bom at 2.21.4). 2.21.4 fixes GHSA-r7wm-3cxj-wff9 and
-        // CVE-2026-54512/-54513 (arbitrary code execution). Drop when the
-        // BOMs catch up.
-        dependency 'com.fasterxml.jackson.core:jackson-core:2.21.4'
-        dependency 'com.fasterxml.jackson.core:jackson-databind:2.21.4'
+        // jackson-bom at 2.21.4). 2.21.4 fixed GHSA-r7wm-3cxj-wff9 and
+        // CVE-2026-54512/-54513 (arbitrary code execution); 2.21.8 also fixes
+        // CVE-2026-89407/-89425 (core) and CVE-2026-68497/-91776/-91777
+        // (databind), all denial of service. Drop when the BOMs catch up.
+        dependency 'com.fasterxml.jackson.core:jackson-core:2.21.8'
+        dependency 'com.fasterxml.jackson.core:jackson-databind:2.21.8'
 
         dependency 'com.mysql:mysql-connector-j:9.7.0'
 
@@ -327,7 +329,14 @@ dependencyManagement {
         dependency 'io.netty:netty-transport:4.1.138.Final'
         dependency 'io.netty:netty-transport-classes-epoll:4.1.138.Final'
         dependency 'io.netty:netty-transport-native-unix-common:4.1.138.Final'
-        dependency 'at.yawk.lz4:lz4-java:1.11.0'
+        // 1.11.4 fixes CVE-2026-106451 (code execution via temporary files).
+        dependency 'at.yawk.lz4:lz4-java:1.11.4'
+        // Transitive only, pinned for the cell image scan. Drop when the
+        // libraries that bring them in catch up: jsoup 1.23.2 fixes
+        // CVE-2026-75140, snappy-java 1.1.10.9 fixed CVE-2026-93451 and
+        // CVE-2026-108106 (both denial of service / memory).
+        dependency 'org.jsoup:jsoup:1.23.2'
+        dependency 'org.xerial.snappy:snappy-java:1.1.10.12'
         dependency 'org.thymeleaf:thymeleaf:3.1.5.RELEASE'
         dependency 'org.thymeleaf:thymeleaf-spring6:3.1.5.RELEASE'
         dependency 'org.apache.tomcat.embed:tomcat-embed-core:10.1.59'
